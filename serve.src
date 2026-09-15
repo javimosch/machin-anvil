@@ -281,7 +281,10 @@ func prep_messages(cr) (out) {
 	}
 	sk := match_skills(last_user, len(cr.tools) > 0, tres == 1)
 	if len(sk) > 0 { inject = inject + sk }
-	if len(cr.tools) > 0 { inject = inject + tools_prompt(cr.tools, cr.reqbody) }
+	// ANVIL_TOOLS_INJECT=0: do not paste the tool schemas into the system prompt. For a model whose
+	// tools are baked in by fine-tuning (MTLM), the schema text would only burn context; tool_calls in
+	// the OUTPUT are still parsed and shaped as OpenAI tool_calls exactly as before.
+	if len(cr.tools) > 0 && env("ANVIL_TOOLS_INJECT") != "0" { inject = inject + tools_prompt(cr.tools, cr.reqbody) }
 	sys_done := 0
 	i := 0
 	while i < len(cr.messages) {
@@ -294,7 +297,11 @@ func prep_messages(cr) (out) {
 			continue
 		}
 		if m.role == "tool" {
-			out = append(out, ChatMsg{role: "user", content: "Tool result: " + m.content})
+			// ANVIL_TOOL_RESULT_MAX=<chars>: truncate long tool results (small-context models); keeps head+tail.
+			tc := m.content
+			mx := parse_int(env("ANVIL_TOOL_RESULT_MAX"))
+			if mx > 40 && len(tc) > mx { tc = substr(tc, 0, mx - 24) + " ... " + substr(tc, len(tc) - 16, len(tc)) }
+			out = append(out, ChatMsg{role: "user", content: "Tool result: " + tc})
 			i = i + 1
 			continue
 		}
