@@ -298,10 +298,10 @@ func prep_messages(cr) (out) {
 		}
 		if m.role == "tool" {
 			// ANVIL_TOOL_RESULT_MAX=<chars>: truncate long tool results (small-context models); keeps head+tail.
-			tc := m.content
+			trc := m.content
 			mx := parse_int(env("ANVIL_TOOL_RESULT_MAX"))
-			if mx > 40 && len(tc) > mx { tc = substr(tc, 0, mx - 24) + " ... " + substr(tc, len(tc) - 16, len(tc)) }
-			out = append(out, ChatMsg{role: "user", content: "Tool result: " + tc})
+			if mx > 40 && len(trc) > mx { trc = substr(trc, 0, mx - 24) + " ... " + substr(trc, len(trc) - 16, len(trc)) }
+			out = append(out, ChatMsg{role: "user", content: "Tool result: " + trc})
 			i = i + 1
 			continue
 		}
