@@ -202,6 +202,7 @@ prefix cache is what carries the multi-turn win.
 
 ## Related
 
+- **[MTLM](https://huggingface.co/javimosch/mtlm-7m-tools)** — models *trained* in machin and served by anvil: [`mtlm-7m-base`](https://huggingface.co/javimosch/mtlm-7m-base) (7.2M params, TinyStories English, 36 h on a 6-core CPU) and [`mtlm-7m-tools`](https://huggingface.co/javimosch/mtlm-7m-tools) (its tool-calling fine-tune — anvil returns real OpenAI `tool_calls` from an 8 MB model; run with `ANVIL_TOOLS_INJECT=0`). The whole loop — tokenizer, pretraining, fine-tune, int8 export, this server — is pure MFL.
 - **[machin](https://github.com/javimosch/machin)** — the machine-first language this is written in. The int8/int4 kernel builtins (`dot_q8`, `dot_q4`, `dot_f32`, `axpy_f32`, `mmap_file`) were contributed upstream from this project.
 - **[tau](https://github.com/javimosch/tau)** — the from-scratch OpenAI-compatible coding agent that anvil serves in the self-hosted loop above.
 - **[JustVugg/colibri](https://github.com/JustVugg/colibri)** — the streaming-MoE engine that inspired this project's origin and its name-until-2026.
