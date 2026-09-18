@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" width="140" alt="anvil"></p>
+
 # ⚒️ machin-anvil
 
 **A real LLM — and the agent that runs on it — forged from scratch, in a language you've never heard of.** Run **Llama-3.2-1B-Instruct** (and Qwen2.5/3, xLAM, a 7B-class MoE) on a CPU you already own at **20+ tokens/sec** — written in **pure [machin](https://github.com/javimosch/machin)** (MFL, a machine-first language), with **zero dependencies**: no BLAS, no llama.cpp, no PyTorch, no Python at runtime. One static binary. It decodes **4× faster than the reference C** (`llama2.c`'s `runq`) it is verified token-for-token against — and it's fast enough to **back a real coding agent, self-hosted, with no cloud.**
