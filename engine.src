@@ -119,6 +119,10 @@ func load_model(path) {
 	seq_len = peek_i32(wbuf, 32)
 	shared_cls = peek_u8(wbuf, 36)
 	gs = peek_i32(wbuf, 37)
+	// matmuls index weight scales per input row (row i at flat offset i*n), so
+	// gs must divide the matmul input dims. A file whose flat sizes merely
+	// divide gs (e.g. dim=288 gs=64) loads "fine" then decodes gibberish.
+	if gs <= 0 || dim % gs != 0 || hidden_dim % gs != 0 { println("bad group size " + str(gs) + ": must divide dim " + str(dim) + " and hidden " + str(hidden_dim))  exit(1) }
 	if v4 == 1 {
 		rope_theta = peek_f32(wbuf, 41)
 		l3_scaling = peek_u8(wbuf, 45)
