@@ -417,6 +417,11 @@ func handle_chat(req) (res) {
 	created := now()
 	msgs := prep_messages(cr)
 	toks := chat_tokens(msgs)
+	if len(toks) >= seq_len {
+		res = ok_json("{\"error\":{\"message\":\"prompt exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
 	has_tools := len(cr.tools) > 0
 
 	// live token streaming (no tools: we don't need to inspect the whole output)
