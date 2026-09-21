@@ -56,6 +56,65 @@ var s_xq_s = 0  // fp32 group scales
 var s_hq = 0
 var s_hq_s = 0
 
+// ---- route-decision head (Jev-style: score the decision, don't generate it) ----
+// head.bin layout: "mhd1" | i32 n_routes | i32 dim | f32 temperature |
+// f32 W[nr*dim] | f32 b[nr] | per-route (u8 len + name bytes).
+// decide() reads s_x (normalized final hidden at the last prompt position)
+// after a prefill, computes route logits = W·s_x + b, softmaxes at temperature.
+var hd_buf = 0     // raw copy of head.bin
+var hd_nr = 0      // number of routes
+var hd_temp = 1.0
+var hd_w = 0       // offset into hd_buf of W
+var hd_b = 0       // offset of bias vector
+var hd_names = []string{}
+var hd_probs = 0   // alloc'd [nr] f32 scratch
+
+func load_head(path) {
+	b := read_file_bytes(path)
+	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
+	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) } // "mhd1" = 0x3164686d LE
+	hd_nr = read_i32(b, 4)
+	hd_dimv := read_i32(b, 8)
+	hd_temp = f32_at(b, 12)
+	if hd_dimv != dim { println("head dim " + str(hd_dimv) + " != model dim " + str(dim))  exit(1) }
+	hd_buf = bytes_to_buf(b)
+	hd_w = 16
+	hd_b = hd_w + hd_nr * dim * 4
+	off := hd_b + hd_nr * 4
+	i := 0
+	while i < hd_nr {
+		n := byte_at(b, off)  off = off + 1
+		hd_names = append(hd_names, bytes_str(bytes_sub(b, off, off + n)))
+		off = off + n
+		i = i + 1
+	}
+	hd_probs = alloc(hd_nr * 4)
+	println("head: " + str(hd_nr) + " routes, dim=" + str(dim) + ", T=" + str(hd_temp))
+	return
+}
+
+// run the head on s_x -> hd_probs[i] = p(route_i); returns best index.
+func decide() (best) {
+	best = 0
+	mx := -1e30
+	i := 0
+	while i < hd_nr {
+		acc := peek_f32(hd_buf, hd_b + i*4)
+		j := 0
+		while j < dim { acc = acc + peek_f32(hd_buf, hd_w + (i*dim + j)*4) * peek_f32(s_x, j*4)  j = j + 1 }
+		v := acc / hd_temp
+		poke_f32(hd_probs, i*4, v)
+		if v > mx { mx = v  best = i }
+		i = i + 1
+	}
+	sum := 0.0
+	i = 0
+	while i < hd_nr { e := exp(peek_f32(hd_probs, i*4) - mx)  poke_f32(hd_probs, i*4, e)  sum = sum + e  i = i + 1 }
+	i = 0
+	while i < hd_nr { poke_f32(hd_probs, i*4, peek_f32(hd_probs, i*4) / sum)  i = i + 1 }
+	return
+}
+
 // ---- tokenizer ----
 var vocab = []string{}
 var vocab_idx = make(map[string]int)

@@ -484,9 +484,98 @@ func handle_chat(req) (res) {
 	return
 }
 
+type DecideReq struct {
+	state string
+	options []string
+}
+
+// system prompt the route head was trained under (synth_tools SYSTEM).
+var decide_sys = "You are a helpful assistant. You can call tools. When a tool is needed, reply with only the JSON tool call. Otherwise answer in plain English."
+
+// POST /v1/decide {"state": "<text>", "options": ["route", ...]?} — Jev-style
+// typed decision: one prefill pass, head scores s_x, no tokens generated.
+func handle_decide(req) (res) {
+	if hd_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	dr := parse(req.body, DecideReq{})
+	if len(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	msgs := []ChatMsg{}
+	m1 := ChatMsg{}  m1.role = "system"  m1.content = decide_sys
+	m2 := ChatMsg{}  m2.role = "user"  m2.content = dr.state
+	msgs = append(msgs, m1)
+	msgs = append(msgs, m2)
+	toks := chat_tokens(msgs)
+	if len(toks) >= seq_len {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	lk := <-mu_acq
+	lk = lk
+	np := len(toks)
+	start := cache_common(toks)
+	if start >= np { start = np - 1 }
+	if np - start >= 16 && quant4 == 0 && pb_enabled == 1 {
+		prefill_batch(toks, start, np)
+	} else {
+		i := start
+		while i < np { forward(toks[i], i)  i = i + 1 }
+	}
+	// ensure s_x holds the normalized hidden at the last prompt position
+	// (the batched prefill leaves it in pb_* buffers, not s_x)
+	forward(toks[np-1], np-1)
+	i := 0
+	while i < np { poke_i32(cache_buf, i*4, toks[i])  i = i + 1 }
+	cache_len = np
+	best := decide()
+	mu_rel <- 1
+	// optional subset restriction: zero out unlisted routes, renormalize
+	if len(dr.options) > 0 {
+		keep := alloc(hd_nr * 4)
+		i = 0
+		while i < hd_nr { poke_f32(keep, i*4, 0.0)  i = i + 1 }
+		i = 0
+		while i < len(dr.options) {
+			j := 0
+			while j < hd_nr { if hd_names[j] == dr.options[i] { poke_f32(keep, j*4, 1.0) }  j = j + 1 }
+			i = i + 1
+		}
+		sum := 0.0
+		i = 0
+		while i < hd_nr {
+			if peek_f32(keep, i*4) < 0.5 { poke_f32(hd_probs, i*4, 0.0) }
+			sum = sum + peek_f32(hd_probs, i*4)
+			i = i + 1
+		}
+		if sum > 0.0 { i = 0  while i < hd_nr { poke_f32(hd_probs, i*4, peek_f32(hd_probs, i*4) / sum)  i = i + 1 } }
+		free(keep)
+		best = 0
+		i = 1
+		while i < hd_nr { if peek_f32(hd_probs, i*4) > peek_f32(hd_probs, best*4) { best = i }  i = i + 1 }
+	}
+	probs := ""
+	i = 0
+	while i < hd_nr {
+		if i > 0 { probs = probs + "," }
+		probs = probs + "\"" + json_esc(hd_names[i]) + "\":" + str(peek_f32(hd_probs, i*4))
+		i = i + 1
+	}
+	body := "{\"object\":\"decision\",\"model\":\"" + model_id + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
+	res = ok_json(body)
+	return
+}
+
 func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
+	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
@@ -514,6 +603,8 @@ func main() {
 	load_model(model)
 	alloc_state()
 	load_tokenizer_auto()
+	hp := env("ANVIL_HEAD")
+	if len(hp) > 0 { load_head(hp) }
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already
