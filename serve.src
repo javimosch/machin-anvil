@@ -663,10 +663,55 @@ func handle_decide(req) (res) {
 	return
 }
 
+// POST /v1/assess {"state": "<text>"} — every loaded head on ONE prefill pass:
+// the Jev multi-question primitive. decide + noul + score all read the same
+// s_x, so one forward pass answers all three questions.
+func handle_assess(req) (res) {
+	if hd_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	dr := parse(req.body, DecideReq{})
+	if len(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	if head_prefill(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	best := decide()
+	py := 0.0
+	if nl_nr > 0 {
+		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
+		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+	}
+	sbest := -1
+	if sc_nr > 0 { sbest = score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs) }
+	mu_rel <- 1
+	body := "{\"object\":\"assess\",\"model\":\"" + model_id + "\",\"decision\":{\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + "}"
+	if nl_nr > 0 {
+		ans := "no"
+		if py >= 0.5 { ans = "yes" }
+		body = body + ",\"noul\":{\"answer\":\"" + ans + "\",\"probability\":" + str(py) + "}"
+	}
+	if sc_nr > 0 {
+		body = body + ",\"score\":{\"grade\":\"" + json_esc(sc_names[sbest]) + "\",\"confidence\":" + str(peek_f32(sc_probs, sbest*4)) + "}"
+	}
+	body = body + "}"
+	res = ok_json(body)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"assess\",\"state\":\"" + json_esc(dr.state) + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + ",\"p_yes\":" + str(py) + "}")
+	return
+}
+
 func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
+	if req.method == "POST" && req.path == "/v1/assess" { res = handle_assess(req)  return }
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
