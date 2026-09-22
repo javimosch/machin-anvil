@@ -1,0 +1,38 @@
+name: probes
+# Regression gate: build anvil from this commit, boot it with the published
+# mtlm-router appliance (model+tokenizer+heads), run the probe suites.
+on:
+  push:
+    paths: [serve.src, engine.src, .github/workflows/probes.yml]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: javimosch/machin
+          path: machin
+      - name: machin toolchain
+        run: |
+          curl -sL https://github.com/javimosch/machin/releases/download/v0.139.0/machin-v0.139.0-linux-amd64 -o /tmp/machin
+          chmod +x /tmp/machin
+      - name: build anvil-serve
+        run: |
+          /tmp/machin encode machin/framework/machweb.src engine.src serve.src > serve.mfl
+          /tmp/machin build serve.mfl -o anvil-serve
+      - name: fetch appliance (model + tokenizer + heads)
+        run: |
+          curl -sL https://github.com/javimosch/mtlm-router/releases/download/v0.1.1/mtlm-router-m7router3s384-linux-amd64.tar.gz | tar xz
+          mv mtlm-router-m7router3s384-linux-amd64 app
+          cp anvil-serve app/anvil-serve   # test THIS build, not the packaged one
+      - name: boot + probe gate
+        run: |
+          mkdir -p /tmp/ptools
+          for f in probe_gate.py nat_probes.json edge_probes.json; do
+            curl -sL "https://raw.githubusercontent.com/javimosch/mtlm-router/master/tools/$f" -o "/tmp/ptools/$f"
+          done
+          cd app && ./start.sh > /tmp/anvil-ci.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8097/health >/dev/null && break; sleep 1; done
+          python3 /tmp/ptools/probe_gate.py --url http://localhost:8097
