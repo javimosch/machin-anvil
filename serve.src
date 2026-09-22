@@ -570,6 +570,41 @@ func handle_noul(req) (res) {
 	return
 }
 
+// POST /v1/score {"state": "<text>"} — Jev-style rubric grade: distribution
+// over the head's ordinal labels + the argmax as "grade". The rubric is fixed
+// at training time — currently request complexity 1..4.
+func handle_score(req) (res) {
+	if sc_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no score head loaded (set ANVIL_SCORE)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	dr := parse(req.body, DecideReq{})
+	if len(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	if head_prefill(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	best := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
+	mu_rel <- 1
+	probs := ""
+	i := 0
+	while i < sc_nr {
+		if i > 0 { probs = probs + "," }
+		probs = probs + "\"" + json_esc(sc_names[i]) + "\":" + str(peek_f32(sc_probs, i*4))
+		i = i + 1
+	}
+	body := "{\"object\":\"score\",\"model\":\"" + model_id + "\",\"grade\":\"" + json_esc(sc_names[best]) + "\",\"confidence\":" + str(peek_f32(sc_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
+	res = ok_json(body)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"score\",\"state\":\"" + json_esc(dr.state) + "\",\"grade\":\"" + json_esc(sc_names[best]) + "\",\"conf\":" + str(peek_f32(sc_probs, best*4)) + "}")
+	return
+}
+
 // POST /v1/decide {"state": "<text>", "options": ["route", ...]?} — Jev-style
 // typed decision: one prefill pass, head scores s_x, no tokens generated.
 func handle_decide(req) (res) {
@@ -633,6 +668,7 @@ func api_route(req) (res) {
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
+	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
@@ -664,6 +700,8 @@ func main() {
 	if len(hp) > 0 { load_head(hp) }
 	np2 := env("ANVIL_NOUL")
 	if len(np2) > 0 { load_noul(np2) }
+	sp := env("ANVIL_SCORE")
+	if len(sp) > 0 { load_score(sp) }
 	decide_log = env("ANVIL_LOG")
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on

@@ -156,6 +156,39 @@ func load_noul(path) {
 	return
 }
 
+// ---- score head (ANVIL_SCORE): third mhd1, ordinal labels ("1".."4") ----
+var sc_buf = 0
+var sc_nr = 0
+var sc_temp = 1.0
+var sc_w = 0
+var sc_b = 0
+var sc_names = []string{}
+var sc_probs = 0
+
+func load_score(path) {
+	b := read_file_bytes(path)
+	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
+	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) }
+	sc_nr = read_i32(b, 4)
+	sc_dimv := read_i32(b, 8)
+	sc_temp = f32_at(b, 12)
+	if sc_dimv != dim { println("score head dim " + str(sc_dimv) + " != model dim " + str(dim))  exit(1) }
+	sc_buf = bytes_to_buf(b)
+	sc_w = 16
+	sc_b = sc_w + sc_nr * dim * 4
+	off := sc_b + sc_nr * 4
+	i := 0
+	while i < sc_nr {
+		n := byte_at(b, off)  off = off + 1
+		sc_names = append(sc_names, bytes_str(bytes_sub(b, off, off + n)))
+		off = off + n
+		i = i + 1
+	}
+	sc_probs = alloc(sc_nr * 4)
+	println("score head: " + str(sc_nr) + " labels, T=" + str(sc_temp))
+	return
+}
+
 // ---- tokenizer ----
 var vocab = []string{}
 var vocab_idx = make(map[string]int)
