@@ -492,31 +492,18 @@ type DecideReq struct {
 // system prompt the route head was trained under (synth_tools SYSTEM).
 var decide_sys = "You are a helpful assistant. You can call tools. When a tool is needed, reply with only the JSON tool call. Otherwise answer in plain English."
 
-// POST /v1/decide {"state": "<text>", "options": ["route", ...]?} — Jev-style
-// typed decision: one prefill pass, head scores s_x, no tokens generated.
-func handle_decide(req) (res) {
-	if hd_nr == 0 {
-		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
-		res.status = "400 Bad Request"
-		return
-	}
-	dr := parse(req.body, DecideReq{})
-	if len(dr.state) == 0 {
-		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
-		res.status = "400 Bad Request"
-		return
-	}
+// head_prefill: render state as system+user chat, prefill, leave the normalized
+// hidden in s_x. Returns 1 ok / 0 too-long. On ok the caller HOLDS the model
+// lock — score the head, then mu_rel <- 1.
+func head_prefill(state) (ok) {
+	ok = 0
 	msgs := []ChatMsg{}
 	m1 := ChatMsg{}  m1.role = "system"  m1.content = decide_sys
-	m2 := ChatMsg{}  m2.role = "user"  m2.content = dr.state
+	m2 := ChatMsg{}  m2.role = "user"  m2.content = state
 	msgs = append(msgs, m1)
 	msgs = append(msgs, m2)
 	toks := chat_tokens(msgs)
-	if len(toks) >= seq_len {
-		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
-		res.status = "400 Bad Request"
-		return
-	}
+	if len(toks) >= seq_len { return }
 	lk := <-mu_acq
 	lk = lk
 	np := len(toks)
@@ -531,15 +518,69 @@ func handle_decide(req) (res) {
 	// ensure s_x holds the normalized hidden at the last prompt position
 	// (the batched prefill leaves it in pb_* buffers, not s_x)
 	forward(toks[np-1], np-1)
-	i := 0
+	i = 0
 	while i < np { poke_i32(cache_buf, i*4, toks[i])  i = i + 1 }
 	cache_len = np
+	ok = 1
+	return
+}
+
+// POST /v1/noul {"state": "<text>"} — Jev-style yes/no: p(yes) from the noul
+// head (a 2-route mhd1 with a "yes" label). The question is fixed at training
+// time; this primitive answers "should this escalate?" for the router.
+func handle_noul(req) (res) {
+	if nl_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no noul head loaded (set ANVIL_NOUL)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	dr := parse(req.body, DecideReq{})
+	if len(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	if head_prefill(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
+	mu_rel <- 1
+	py := 0.0
+	if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+	ans := "no"
+	if py >= 0.5 { ans = "yes" }
+	body := "{\"object\":\"noul\",\"model\":\"" + model_id + "\",\"answer\":\"" + ans + "\",\"probability\":" + str(py) + "}"
+	res = ok_json(body)
+	return
+}
+
+// POST /v1/decide {"state": "<text>", "options": ["route", ...]?} — Jev-style
+// typed decision: one prefill pass, head scores s_x, no tokens generated.
+func handle_decide(req) (res) {
+	if hd_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	dr := parse(req.body, DecideReq{})
+	if len(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	if head_prefill(dr.state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
 	best := decide()
 	mu_rel <- 1
 	// optional subset restriction: zero out unlisted routes, renormalize
 	if len(dr.options) > 0 {
 		keep := alloc(hd_nr * 4)
-		i = 0
+		i := 0
 		while i < hd_nr { poke_f32(keep, i*4, 0.0)  i = i + 1 }
 		i = 0
 		while i < len(dr.options) {
@@ -576,6 +617,7 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
+	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
@@ -605,6 +647,8 @@ func main() {
 	load_tokenizer_auto()
 	hp := env("ANVIL_HEAD")
 	if len(hp) > 0 { load_head(hp) }
+	np2 := env("ANVIL_NOUL")
+	if len(np2) > 0 { load_noul(np2) }
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already

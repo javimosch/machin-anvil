@@ -93,25 +93,66 @@ func load_head(path) {
 	return
 }
 
-// run the head on s_x -> hd_probs[i] = p(route_i); returns best index.
-func decide() (best) {
+// generic head scorer: softmax(buf: W,b over s_x, temperature) -> probs[i];
+// returns best index. Works for the route head (hd_*) and the noul head (nl_*).
+func score_head(buf, nr, woff, boff, temp, probs) (best) {
 	best = 0
 	mx := -1e30
 	i := 0
-	while i < hd_nr {
-		acc := peek_f32(hd_buf, hd_b + i*4)
+	while i < nr {
+		acc := peek_f32(buf, boff + i*4)
 		j := 0
-		while j < dim { acc = acc + peek_f32(hd_buf, hd_w + (i*dim + j)*4) * peek_f32(s_x, j*4)  j = j + 1 }
-		v := acc / hd_temp
-		poke_f32(hd_probs, i*4, v)
+		while j < dim { acc = acc + peek_f32(buf, woff + (i*dim + j)*4) * peek_f32(s_x, j*4)  j = j + 1 }
+		v := acc / temp
+		poke_f32(probs, i*4, v)
 		if v > mx { mx = v  best = i }
 		i = i + 1
 	}
 	sum := 0.0
 	i = 0
-	while i < hd_nr { e := exp(peek_f32(hd_probs, i*4) - mx)  poke_f32(hd_probs, i*4, e)  sum = sum + e  i = i + 1 }
+	while i < nr { e := exp(peek_f32(probs, i*4) - mx)  poke_f32(probs, i*4, e)  sum = sum + e  i = i + 1 }
 	i = 0
-	while i < hd_nr { poke_f32(hd_probs, i*4, peek_f32(hd_probs, i*4) / sum)  i = i + 1 }
+	while i < nr { poke_f32(probs, i*4, peek_f32(probs, i*4) / sum)  i = i + 1 }
+	return
+}
+
+// run the route head on s_x -> hd_probs[i] = p(route_i); returns best index.
+func decide() (best) {
+	best = score_head(hd_buf, hd_nr, hd_w, hd_b, hd_temp, hd_probs)
+	return
+}
+
+// ---- noul head (ANVIL_NOUL): a second mhd1 with a "yes" route -> p(yes) ----
+var nl_buf = 0
+var nl_nr = 0
+var nl_temp = 1.0
+var nl_w = 0
+var nl_b = 0
+var nl_yes = -1   // index of the "yes" route, found at load
+var nl_probs = 0
+
+func load_noul(path) {
+	b := read_file_bytes(path)
+	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
+	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) }
+	nl_nr = read_i32(b, 4)
+	nl_dimv := read_i32(b, 8)
+	nl_temp = f32_at(b, 12)
+	if nl_dimv != dim { println("noul head dim " + str(nl_dimv) + " != model dim " + str(dim))  exit(1) }
+	nl_buf = bytes_to_buf(b)
+	nl_w = 16
+	nl_b = nl_w + nl_nr * dim * 4
+	off := nl_b + nl_nr * 4
+	i := 0
+	while i < nl_nr {
+		n := byte_at(b, off)  off = off + 1
+		nm := bytes_str(bytes_sub(b, off, off + n))
+		if nm == "yes" { nl_yes = i }
+		off = off + n
+		i = i + 1
+	}
+	nl_probs = alloc(nl_nr * 4)
+	println("noul head: " + str(nl_nr) + " routes, yes_idx=" + str(nl_yes) + ", T=" + str(nl_temp))
 	return
 }
 
