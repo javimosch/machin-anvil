@@ -1,6 +1,8 @@
 // colibri serve — OpenAI-compatible inference server in pure MFL.
 // Build: machin encode framework/machweb.src engine.src serve.src > serve.mfl
-// Endpoints: GET /v1/models, POST /v1/chat/completions (stream + non-stream).
+// Endpoints: GET /v1/models, POST /v1/chat/completions (stream + non-stream),
+// POST /v1/decide|noul|score|assess (head primitives), POST /v1/route (the
+// dispatcher: assess + gates + optional execute with head/trunk agreement).
 // Single-flight: one generation at a time via a mutex-as-service channel;
 // the winning request runs inference in ITS goroutine (worker pool is shared,
 // exclusive under the lock). Single-slot KV prefix cache makes multi-turn
@@ -673,6 +675,174 @@ func handle_decide(req) (res) {
 	return
 }
 
+// POST /v1/route — THE dispatcher: one call in, one dispatch decision out.
+//   {"state": "<text>"} or OpenAI-style {"messages": [...]} (last user msg =
+//   state, earlier user/assistant texts = context). Options:
+//     "execute": true   — after routing, actually run the dispatch under the
+//                         model lock (tool_call JSON for tool routes, prose
+//                         for chat). The head and the trunk must AGREE or the
+//                         call delegates — the Jev agreement gate.
+//     "options": [...]  — restrict to a route subset (same as /v1/decide)
+//     "min_conf": f     — confidence floor (default ANVIL_ROUTE_MINCONF|0.55)
+// Gates, in order: noul p(yes)>=0.5 -> delegate(noul_escalate);
+// conf < min_conf -> delegate(low_confidence); route==escalate ->
+// delegate(route_escalate); execute: head!=trunk -> delegate(disagree).
+// Response: action = delegate | tool_call | generate (+ call/content when
+// executed), with route, confidence, p_yes, tier, reason, latency_ms.
+type RouteReq struct {
+	state string
+	options []string
+	context []string
+	messages []ChatMsg
+	execute bool
+	min_conf float
+	max_tokens int
+}
+
+func route_state(dr) (state, ctx) {
+	state = dr.state
+	ctx = dr.context
+	if len(state) == 0 && len(dr.messages) > 0 {
+		i := len(dr.messages) - 1
+		while i >= 0 {
+			if dr.messages[i].role == "user" { state = dr.messages[i].content  break }
+			i = i - 1
+		}
+		ctx = []string{}
+		j := 0
+		while j < i {
+			if dr.messages[j].role == "user" || dr.messages[j].role == "assistant" {
+				ctx = append(ctx, dr.messages[j].content)
+			}
+			j = j + 1
+		}
+	}
+	return
+}
+
+func handle_route(req) (res) {
+	if hd_nr == 0 {
+		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	t0 := now_ms()
+	dr := parse(req.body, RouteReq{})
+	state, ctx := route_state(dr)
+	if len(state) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state or messages required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	minconf := 0.55
+	emc := parse_float(env("ANVIL_ROUTE_MINCONF"))
+	if emc > 0.0 { minconf = emc }
+	if dr.min_conf > 0.0 { minconf = dr.min_conf }
+	if head_prefill(state, ctx) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	best := decide()
+	// optional subset restriction: zero out unlisted routes, renormalize
+	if len(dr.options) > 0 {
+		keep := alloc(hd_nr * 4)
+		i := 0
+		while i < hd_nr { poke_f32(keep, i*4, 0.0)  i = i + 1 }
+		i = 0
+		while i < len(dr.options) {
+			j := 0
+			while j < hd_nr { if hd_names[j] == dr.options[i] { poke_f32(keep, j*4, 1.0) }  j = j + 1 }
+			i = i + 1
+		}
+		sum := 0.0
+		i = 0
+		while i < hd_nr {
+			if peek_f32(keep, i*4) < 0.5 { poke_f32(hd_probs, i*4, 0.0) }
+			sum = sum + peek_f32(hd_probs, i*4)
+			i = i + 1
+		}
+		if sum > 0.0 { i = 0  while i < hd_nr { poke_f32(hd_probs, i*4, peek_f32(hd_probs, i*4) / sum)  i = i + 1 } }
+		free(keep)
+		best = 0
+		i = 1
+		while i < hd_nr { if peek_f32(hd_probs, i*4) > peek_f32(hd_probs, best*4) { best = i }  i = i + 1 }
+	}
+	py := 0.0
+	if nl_nr > 0 {
+		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
+		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+	}
+	tier := ""
+	if sc_nr > 0 {
+		sb := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
+		tier = sc_names[sb]
+	}
+	conf := peek_f32(hd_probs, best*4)
+	route := hd_names[best]
+	action := "generate"
+	if route != "chat" { action = "tool_call" }
+	reason := "ok"
+	if py >= 0.5 { action = "delegate"  reason = "noul_escalate" }
+	if action != "delegate" && conf < minconf { action = "delegate"  reason = "low_confidence" }
+	if action != "delegate" && route == "escalate" { action = "delegate"  reason = "route_escalate" }
+
+	call_name := ""
+	call_args := "{}"
+	content := ""
+	if dr.execute && action != "delegate" {
+		// still holding the model lock from head_prefill; prompt tokens are
+		// already in the prefix cache so generation starts ~free.
+		mt := dr.max_tokens
+		if mt <= 0 { mt = 128 }
+		out := []string{}
+		hp := []ChatMsg{}
+		m1 := ChatMsg{}  m1.role = "system"  m1.content = decide_sys
+		hp = append(hp, m1)
+		i := 0
+		while i < len(ctx) {
+			cm := ChatMsg{}
+			if i % 2 == 0 { cm.role = "user" } else { cm.role = "assistant" }
+			cm.content = ctx[i]
+			hp = append(hp, cm)
+			i = i + 1
+		}
+		m2 := ChatMsg{}  m2.role = "user"  m2.content = state
+		hp = append(hp, m2)
+		toks := chat_tokens(hp)
+		rng_seed(now_ms() & 2147483647)
+		generate_cb(toks, mt, 0.0, 0.9, func(piece) {
+			out = append(out, piece)
+		})
+		full := join(out, "")
+		tname, targs := parse_tool_call(full)
+		if len(tname) > 0 {
+			if tname == route {
+				call_name = tname  call_args = targs
+			} else {
+				action = "delegate"  reason = "head_trunk_disagree"
+			}
+		} else {
+			if route == "chat" {
+				content = full
+			} else {
+				action = "delegate"  reason = "head_trunk_disagree"
+			}
+		}
+	}
+	mu_rel <- 1
+	lat := now_ms() - t0
+	body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"confidence\":" + str(conf) + ",\"p_yes\":" + str(py)
+	if len(tier) > 0 { body = body + ",\"tier\":\"" + json_esc(tier) + "\"" }
+	body = body + ",\"reason\":\"" + reason + "\""
+	if len(call_name) > 0 { body = body + ",\"call\":{\"name\":\"" + json_esc(call_name) + "\",\"arguments\":" + call_args + "}" }
+	if len(content) > 0 { body = body + ",\"content\":\"" + json_esc(content) + "\"" }
+	body = body + ",\"latency_ms\":" + str(lat) + "}"
+	res = ok_json(body)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"}")
+	return
+}
+
 // POST /v1/assess {"state": "<text>"} — every loaded head on ONE prefill pass:
 // the Jev multi-question primitive. decide + noul + score all read the same
 // s_x, so one forward pass answers all three questions.
@@ -721,6 +891,7 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
+	if req.method == "POST" && req.path == "/v1/route" { res = handle_route(req)  return }
 	if req.method == "POST" && req.path == "/v1/assess" { res = handle_assess(req)  return }
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
