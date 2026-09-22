@@ -136,6 +136,7 @@ Streaming (`"stream": true`), tool/function-calling, `seed`, `temperature`, and 
 - **Quantization**: Q8_0 (int8) and an int4 variant, dequant-on-use in the matmul.
 - **Tokenizers**: SentencePiece (TinyLlama) **and** a from-scratch tiktoken/BPE (Llama-3.2), NUL-safe.
 - **Server**: OpenAI-compatible `/v1/chat/completions` + `/v1/models` + `/health`, SSE streaming, prompt-based tool calling, prefix cache.
+- **Typed decision endpoints** — linear heads on the frozen trunk read the hidden state in one forward pass (~15 ms): `/v1/decide` (route), `/v1/noul` (escalate?), `/v1/score` (complexity), `/v1/assess` (all at once), and **`/v1/route`** — the dispatcher: assess → gate → optional execute with head↔generation agreement. Load heads via `ANVIL_HEAD`/`ANVIL_NOUL`/`ANVIL_SCORE`.
 - **Speed**: mmap load, worker-pool matmul, batched prefill, `dot_q8`/`dot_q4` builtins (contributed to machin core).
 - **Continuous batching primitive** — per-slot KV caches, one batched forward advances N requests (exact; see the frontier doc for why it's a fleet-throughput lever, not a latency one).
 
