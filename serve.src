@@ -1082,6 +1082,18 @@ func main() {
 		println("tenants: " + str(len(tkeys)) + " key->head mapping(s)")
 	}
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
+	// model id shown in responses: basename of the model file, or
+	// ANVIL_MODEL_ID to override entirely.
+	if len(a) > 1 {
+		mid := model
+		mi := index(mid, "/")
+		while mi >= 0 { mid = substr(mid, mi + 1, len(mid))  mi = index(mid, "/") }
+		if has_suffix(mid, ".bin") { mid = substr(mid, 0, len(mid) - 4) }
+		if has_suffix(mid, ".mtlm") { mid = substr(mid, 0, len(mid) - 5) }
+		if len(mid) > 0 { model_id = mid }
+	}
+	mido := env("ANVIL_MODEL_ID")
+	if len(mido) > 0 { model_id = mido }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already
 	// saturate tool reliability, so extra context only adds drift). The mechanism
