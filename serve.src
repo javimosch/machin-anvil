@@ -500,6 +500,27 @@ var decide_sys = "You are a helpful assistant. You can call tools. When a tool i
 // outcome later; outcomes arrive when downstream reports them).
 var decide_log = ""
 
+// delegation upstream: when /v1/route delegates and execute=true, the request
+// is forwarded here (OpenAI-compatible /v1/chat/completions endpoint) and the
+// upstream answer rides back in "content" with "via" naming the upstream.
+// ANVIL_DELEGATE_URL / ANVIL_DELEGATE_KEY / ANVIL_DELEGATE_MODEL — unset =
+// delegate stays a caller-handled decision, no forwarding.
+var delegate_url = ""
+var delegate_key = ""
+var delegate_model = ""
+var delegate_sys = ""
+
+type UpMsg struct {
+	role string
+	content string
+}
+type UpChoice struct {
+	message UpMsg
+}
+type UpResp struct {
+	choices []UpChoice
+}
+
 func log_decision(line) {
 	if len(decide_log) == 0 { return }
 	off := file_size(decide_log)
@@ -831,8 +852,60 @@ func handle_route(req) (res) {
 		}
 	}
 	mu_rel <- 1
+	via := ""
+	if dr.execute && action == "delegate" && len(delegate_url) > 0 {
+		// upstream handoff — after mu_rel so a slow upstream never holds the
+		// model lock; the trunk is no longer needed.
+		mb := ""
+		if len(dr.messages) > 0 {
+			i := 0
+			while i < len(dr.messages) {
+				if i > 0 { mb = mb + "," }
+				mb = mb + "{\"role\":\"" + json_esc(dr.messages[i].role) + "\",\"content\":\"" + json_esc(dr.messages[i].content) + "\"}"
+				i = i + 1
+			}
+		} else {
+			// upstream is a general model — pass the user's request through
+			// (optional ANVIL_DELEGATE_SYS prepends a system prompt); do NOT
+			// forward our router system prompt, which asks for tool-call JSON.
+			first := 1
+			if len(delegate_sys) > 0 {
+				mb = "{\"role\":\"system\",\"content\":\"" + json_esc(delegate_sys) + "\"}"
+				first = 0
+			}
+			i := 0
+			while i < len(ctx) {
+				if first == 1 { first = 0 } else { mb = mb + "," }
+				mb = mb + "{\"role\":\""
+				if i % 2 == 0 { mb = mb + "user" } else { mb = mb + "assistant" }
+				mb = mb + "\",\"content\":\"" + json_esc(ctx[i]) + "\"}"
+				i = i + 1
+			}
+			if first == 0 { mb = mb + "," }
+			mb = mb + "{\"role\":\"user\",\"content\":\"" + json_esc(state) + "\"}"
+		}
+		ub := "{\"messages\":[" + mb + "]"
+		if len(delegate_model) > 0 { ub = ub + ",\"model\":\"" + json_esc(delegate_model) + "\"" }
+		umt := dr.max_tokens
+		if umt <= 0 { umt = 512 }
+		ub = ub + ",\"max_tokens\":" + str(umt) + "}"
+		hdrs := []string{"Content-Type: application/json"}
+		if len(delegate_key) > 0 { hdrs = append(hdrs, "Authorization: Bearer " + delegate_key) }
+		us, ubody, uerr := http_request("POST", delegate_url, hdrs, ub)
+		if len(uerr) == 0 && us == 200 {
+			ur := parse(ubody, UpResp{})
+			if len(ur.choices) > 0 {
+				content = ur.choices[0].message.content
+				via = delegate_model
+				if len(via) == 0 { via = delegate_url }
+			}
+		} else {
+			reason = reason + "+upstream_error"
+		}
+	}
 	lat := now_ms() - t0
 	body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"confidence\":" + str(conf) + ",\"p_yes\":" + str(py)
+	if len(via) > 0 { body = body + ",\"via\":\"" + json_esc(via) + "\"" }
 	if len(tier) > 0 { body = body + ",\"tier\":\"" + json_esc(tier) + "\"" }
 	body = body + ",\"reason\":\"" + reason + "\""
 	if len(call_name) > 0 { body = body + ",\"call\":{\"name\":\"" + json_esc(call_name) + "\",\"arguments\":" + call_args + "}" }
@@ -929,6 +1002,11 @@ func main() {
 	sp := env("ANVIL_SCORE")
 	if len(sp) > 0 { load_score(sp) }
 	decide_log = env("ANVIL_LOG")
+	delegate_url = env("ANVIL_DELEGATE_URL")
+	delegate_key = env("ANVIL_DELEGATE_KEY")
+	delegate_model = env("ANVIL_DELEGATE_MODEL")
+	delegate_sys = env("ANVIL_DELEGATE_SYS")
+	if len(delegate_url) > 0 { println("route delegation upstream: " + delegate_url) }
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already
