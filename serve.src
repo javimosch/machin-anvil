@@ -492,6 +492,19 @@ type DecideReq struct {
 // system prompt the route head was trained under (synth_tools SYSTEM).
 var decide_sys = "You are a helpful assistant. You can call tools. When a tool is needed, reply with only the JSON tool call. Otherwise answer in plain English."
 
+// decision logging: ANVIL_LOG=<path> appends one JSONL row per decide/noul
+// call — the raw material for real-traffic calibration (bucket conf vs
+// outcome later; outcomes arrive when downstream reports them).
+var decide_log = ""
+
+func log_decision(line) {
+	if len(decide_log) == 0 { return }
+	off := file_size(decide_log)
+	if off < 0 { off = 0 }
+	write_file_at(decide_log, off, bytes(line + "\n"))
+	return
+}
+
 // head_prefill: render state as system+user chat, prefill, leave the normalized
 // hidden in s_x. Returns 1 ok / 0 too-long. On ok the caller HOLDS the model
 // lock — score the head, then mu_rel <- 1.
@@ -553,6 +566,7 @@ func handle_noul(req) (res) {
 	if py >= 0.5 { ans = "yes" }
 	body := "{\"object\":\"noul\",\"model\":\"" + model_id + "\",\"answer\":\"" + ans + "\",\"probability\":" + str(py) + "}"
 	res = ok_json(body)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"noul\",\"state\":\"" + json_esc(dr.state) + "\",\"answer\":\"" + ans + "\",\"p_yes\":" + str(py) + "}")
 	return
 }
 
@@ -610,6 +624,7 @@ func handle_decide(req) (res) {
 	}
 	body := "{\"object\":\"decision\",\"model\":\"" + model_id + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
 	res = ok_json(body)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"decide\",\"state\":\"" + json_esc(dr.state) + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
 	return
 }
 
@@ -649,6 +664,7 @@ func main() {
 	if len(hp) > 0 { load_head(hp) }
 	np2 := env("ANVIL_NOUL")
 	if len(np2) > 0 { load_noul(np2) }
+	decide_log = env("ANVIL_LOG")
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already
