@@ -487,6 +487,7 @@ func handle_chat(req) (res) {
 type DecideReq struct {
 	state string
 	options []string
+	context []string
 }
 
 // system prompt the route head was trained under (synth_tools SYSTEM).
@@ -508,12 +509,21 @@ func log_decision(line) {
 // head_prefill: render state as system+user chat, prefill, leave the normalized
 // hidden in s_x. Returns 1 ok / 0 too-long. On ok the caller HOLDS the model
 // lock — score the head, then mu_rel <- 1.
-func head_prefill(state) (ok) {
+func head_prefill(state, ctx) (ok) {
 	ok = 0
 	msgs := []ChatMsg{}
 	m1 := ChatMsg{}  m1.role = "system"  m1.content = decide_sys
-	m2 := ChatMsg{}  m2.role = "user"  m2.content = state
 	msgs = append(msgs, m1)
+	// optional prior turns: ctx is alternating user/assistant text, oldest first
+	i := 0
+	while i < len(ctx) {
+		cm := ChatMsg{}
+		if i % 2 == 0 { cm.role = "user" } else { cm.role = "assistant" }
+		cm.content = ctx[i]
+		msgs = append(msgs, cm)
+		i = i + 1
+	}
+	m2 := ChatMsg{}  m2.role = "user"  m2.content = state
 	msgs = append(msgs, m2)
 	toks := chat_tokens(msgs)
 	if len(toks) >= seq_len { return }
@@ -553,7 +563,7 @@ func handle_noul(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	if head_prefill(dr.state) == 0 {
+	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
@@ -585,7 +595,7 @@ func handle_score(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	if head_prefill(dr.state) == 0 {
+	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
@@ -619,7 +629,7 @@ func handle_decide(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	if head_prefill(dr.state) == 0 {
+	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
@@ -678,7 +688,7 @@ func handle_assess(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	if head_prefill(dr.state) == 0 {
+	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
