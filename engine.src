@@ -68,27 +68,64 @@ var hd_w = 0       // offset into hd_buf of W
 var hd_b = 0       // offset of bias vector
 var hd_names = []string{}
 var hd_probs = 0   // alloc'd [nr] f32 scratch
+var hd_path = ""   // path of the currently loaded head (tenant swaps re-load)
 
-func load_head(path) {
+// a parsed head bundle — tenant heads are read once at startup (main
+// goroutine arena = permanent) and swapped in per-request by set_head, since
+// anything allocated inside a request handler dies with that goroutine.
+type Head struct {
+	buf int
+	nr int
+	temp float
+	w int
+	b int
+	names []string
+	probs int
+	path string
+}
+
+func read_head(path) (h) {
+	h = Head{}
 	b := read_file_bytes(path)
 	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
 	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) } // "mhd1" = 0x3164686d LE
-	hd_nr = read_i32(b, 4)
+	h.nr = read_i32(b, 4)
 	hd_dimv := read_i32(b, 8)
-	hd_temp = f32_at(b, 12)
+	h.temp = f32_at(b, 12)
 	if hd_dimv != dim { println("head dim " + str(hd_dimv) + " != model dim " + str(dim))  exit(1) }
-	hd_buf = bytes_to_buf(b)
-	hd_w = 16
-	hd_b = hd_w + hd_nr * dim * 4
-	off := hd_b + hd_nr * 4
+	h.buf = bytes_to_buf(b)
+	h.w = 16
+	h.b = h.w + h.nr * dim * 4
+	h.path = path
+	h.names = []string{}
+	off := h.b + h.nr * 4
 	i := 0
-	while i < hd_nr {
+	while i < h.nr {
 		n := byte_at(b, off)  off = off + 1
-		hd_names = append(hd_names, bytes_str(bytes_sub(b, off, off + n)))
+		h.names = append(h.names, bytes_str(bytes_sub(b, off, off + n)))
 		off = off + n
 		i = i + 1
 	}
-	hd_probs = alloc(hd_nr * 4)
+	h.probs = alloc(h.nr * 4)
+	return
+}
+
+func set_head(h) {
+	hd_buf = h.buf  hd_nr = h.nr  hd_temp = h.temp  hd_w = h.w  hd_b = h.b
+	hd_names = h.names  hd_probs = h.probs  hd_path = h.path
+	return
+}
+
+// snapshot the active head globals into a Head (e.g. the default ANVIL_HEAD).
+func cur_head() (h) {
+	h = Head{}
+	h.buf = hd_buf  h.nr = hd_nr  h.temp = hd_temp  h.w = hd_w  h.b = hd_b
+	h.names = hd_names  h.probs = hd_probs  h.path = hd_path
+	return
+}
+
+func load_head(path) {
+	set_head(read_head(path))
 	println("head: " + str(hd_nr) + " routes, dim=" + str(dim) + ", T=" + str(hd_temp))
 	return
 }

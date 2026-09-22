@@ -510,6 +510,47 @@ var delegate_key = ""
 var delegate_model = ""
 var delegate_sys = ""
 
+// auth + tenancy: ANVIL_KEYS="k1,k2" gates all /v1/* behind Bearer auth
+// (/health stays open). ANVIL_TENANTS="k1:headA.head,k2:headB.head" maps a
+// key to its own decision head — swapped in per request under the model
+// lock. Unknown/unkeyed requests get the ANVIL_HEAD default.
+var api_keys = []string{}
+var tkeys = []string{}
+var thead = []Head{}   // parallel to tkeys: tenant heads preloaded at startup
+var def_head = Head{}  // snapshot of ANVIL_HEAD for unmapped keys
+
+func bearer_key(req) (k) {
+	k = ""
+	a := trim(header(req, "authorization"))
+	if has_prefix(a, "Bearer ") { k = trim(substr(a, 7, len(a))) }
+	return
+}
+
+func auth_ok(req) (ok) {
+	ok = 1
+	if len(api_keys) > 0 {
+		ok = 0
+		k := bearer_key(req)
+		i := 0
+		while i < len(api_keys) { if api_keys[i] == k { ok = 1 }  i = i + 1 }
+	}
+	return
+}
+
+// swap in the tenant's head if the caller's key is mapped; must be called
+// while the model lock is held (after head_prefill, before decide).
+func apply_tenant_head(req) {
+	if len(tkeys) == 0 { return }
+	k := bearer_key(req)
+	i := 0
+	while i < len(tkeys) {
+		if tkeys[i] == k { set_head(thead[i])  return }
+		i = i + 1
+	}
+	set_head(def_head)
+	return
+}
+
 type UpMsg struct {
 	role string
 	content string
@@ -657,8 +698,8 @@ func handle_decide(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	apply_tenant_head(req)
 	best := decide()
-	mu_rel <- 1
 	// optional subset restriction: zero out unlisted routes, renormalize
 	if len(dr.options) > 0 {
 		keep := alloc(hd_nr * 4)
@@ -691,6 +732,7 @@ func handle_decide(req) (res) {
 		i = i + 1
 	}
 	body := "{\"object\":\"decision\",\"model\":\"" + model_id + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
+	mu_rel <- 1
 	res = ok_json(body)
 	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"decide\",\"state\":\"" + json_esc(dr.state) + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
 	return
@@ -764,6 +806,7 @@ func handle_route(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	apply_tenant_head(req)
 	best := decide()
 	// optional subset restriction: zero out unlisted routes, renormalize
 	if len(dr.options) > 0 {
@@ -936,6 +979,7 @@ func handle_assess(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	apply_tenant_head(req)
 	best := decide()
 	py := 0.0
 	if nl_nr > 0 {
@@ -961,6 +1005,11 @@ func handle_assess(req) (res) {
 }
 
 func api_route(req) (res) {
+	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
+		res.status = "401 Unauthorized"
+		return
+	}
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
@@ -1007,6 +1056,31 @@ func main() {
 	delegate_model = env("ANVIL_DELEGATE_MODEL")
 	delegate_sys = env("ANVIL_DELEGATE_SYS")
 	if len(delegate_url) > 0 { println("route delegation upstream: " + delegate_url) }
+	ak := env("ANVIL_KEYS")
+	if len(ak) > 0 {
+		api_keys = split(ak, ",")
+		i := 0
+		while i < len(api_keys) { api_keys[i] = trim(api_keys[i])  i = i + 1 }
+		println("api auth: " + str(len(api_keys)) + " key(s) required on /v1/*")
+	}
+	tn := env("ANVIL_TENANTS")
+	if len(tn) > 0 {
+		if hd_nr == 0 { println("ANVIL_TENANTS requires ANVIL_HEAD (the default head)")  exit(1) }
+		def_head = cur_head()
+		tp := split(tn, ",")
+		i := 0
+		while i < len(tp) {
+			sep := index(tp[i], ":")
+			if sep > 0 {
+				tkeys = append(tkeys, trim(substr(tp[i], 0, sep)))
+				// preload+validate now: main-goroutine arena is permanent, and
+				// a bad tenant head fails the boot instead of a request.
+				thead = append(thead, read_head(trim(substr(tp[i], sep + 1, len(tp[i])))))
+			}
+			i = i + 1
+		}
+		println("tenants: " + str(len(tkeys)) + " key->head mapping(s)")
+	}
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// skills are OPT-IN (COLIBRI_SKILLS=<dir>): measured to HURT reliability on
 	// the 1B baseline (see bench/SKILLS-EVAL.md — the M6 prompt+parser already
