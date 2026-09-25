@@ -519,6 +519,18 @@ var tkeys = []string{}
 var thead = []Head{}   // parallel to tkeys: tenant heads preloaded at startup
 var def_head = Head{}  // snapshot of ANVIL_HEAD for unmapped keys
 
+// MoE gate: ANVIL_GATE=<gate.head> turns /v1/route into a two-stage
+// dispatcher. The gate head scores the DOMAIN on the same prefill hidden
+// state, then the matching ANVIL_EXPERTS="dom:head.head,..." head scores the
+// routes — one forward pass, two decisions. gate_conf below
+// ANVIL_GATE_MINCONF (or the request's min_gate_conf) delegates with reason
+// low_gate_confidence; a domain with no expert mapping falls back to the
+// ANVIL_HEAD default.
+var ghead = Head{}
+var edomains = []string{}
+var eheads = []Head{}      // parallel to edomains
+var gate_minconf = 0.0
+
 func bearer_key(req) (k) {
 	k = ""
 	a := trim(header(req, "authorization"))
@@ -759,6 +771,7 @@ type RouteReq struct {
 	messages []ChatMsg
 	execute bool
 	min_conf float
+	min_gate_conf float
 	max_tokens int
 }
 
@@ -806,7 +819,35 @@ func handle_route(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	apply_tenant_head(req)
+	domain := ""
+	gconf := 0.0
+	expert := ""
+	if len(ghead.names) > 0 {
+		// MoE gate: score the domain on the same prefill, then swap in the
+		// expert head for that domain (ANVIL_HEAD default when unmapped).
+		gb := score_head(ghead.buf, ghead.nr, ghead.w, ghead.b, ghead.temp, ghead.probs)
+		domain = ghead.names[gb]
+		gconf = peek_f32(ghead.probs, gb*4)
+		gmc := gate_minconf
+		if dr.min_gate_conf > 0.0 { gmc = dr.min_gate_conf }
+		expert = "default"
+		set_head(def_head)
+		i := 0
+		while i < len(edomains) {
+			if edomains[i] == domain { set_head(eheads[i])  expert = domain }
+			i = i + 1
+		}
+		if gconf < gmc {
+			lat := now_ms() - t0
+			body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"delegate\",\"route\":\"\",\"confidence\":0.0,\"p_yes\":0.0,\"reason\":\"low_gate_confidence\",\"domain\":\"" + json_esc(domain) + "\",\"gate_confidence\":" + str(gconf) + ",\"latency_ms\":" + str(lat) + "}"
+			mu_rel <- 1
+			res = ok_json(body)
+			log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"delegate\",\"reason\":\"low_gate_confidence\",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + "}")
+			return
+		}
+	} else {
+		apply_tenant_head(req)
+	}
 	best := decide()
 	// optional subset restriction: zero out unlisted routes, renormalize
 	if len(dr.options) > 0 {
@@ -948,6 +989,7 @@ func handle_route(req) (res) {
 	}
 	lat := now_ms() - t0
 	body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"confidence\":" + str(conf) + ",\"p_yes\":" + str(py)
+	if len(ghead.names) > 0 { body = body + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_confidence\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\"" }
 	if len(via) > 0 { body = body + ",\"via\":\"" + json_esc(via) + "\"" }
 	if len(tier) > 0 { body = body + ",\"tier\":\"" + json_esc(tier) + "\"" }
 	body = body + ",\"reason\":\"" + reason + "\""
@@ -1080,6 +1122,28 @@ func main() {
 			i = i + 1
 		}
 		println("tenants: " + str(len(tkeys)) + " key->head mapping(s)")
+	}
+	gp := env("ANVIL_GATE")
+	if len(gp) > 0 {
+		if hd_nr == 0 { println("ANVIL_GATE requires ANVIL_HEAD (the fallback expert head)")  exit(1) }
+		ghead = read_head(gp)
+		if len(tkeys) == 0 { def_head = cur_head() }
+		gm := parse_float(env("ANVIL_GATE_MINCONF"))
+		if gm > 0.0 { gate_minconf = gm }
+		ex := env("ANVIL_EXPERTS")
+		if len(ex) > 0 {
+			xp := split(ex, ",")
+			i := 0
+			while i < len(xp) {
+				sep := index(xp[i], ":")
+				if sep > 0 {
+					edomains = append(edomains, trim(substr(xp[i], 0, sep)))
+					eheads = append(eheads, read_head(trim(substr(xp[i], sep + 1, len(xp[i])))))
+				}
+				i = i + 1
+			}
+		}
+		println("gate: " + str(ghead.nr) + " domains -> " + str(len(edomains)) + " expert head(s) (minconf=" + str(gate_minconf) + ")")
 	}
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// model id shown in responses: basename of the model file, or
