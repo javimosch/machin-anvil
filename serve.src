@@ -606,17 +606,54 @@ func head_prefill(state, ctx) (ok) {
 	lk := <-mu_acq
 	lk = lk
 	np := len(toks)
-	start := cache_common(toks)
-	if start >= np { start = np - 1 }
-	if np - start >= 16 && quant4 == 0 && pb_enabled == 1 {
-		prefill_batch(toks, start, np)
+	if pool_kind > 0 {
+		// pooled heads read a max/mean over the last user turn's token span —
+		// every position must be forwarded (no batch prefill, no prefix-cache
+		// reuse or earlier span positions would go untapped).
+		tail_len := len(chat_tokens([]ChatMsg{})) - 1
+		pmsgs := []ChatMsg{}
+		i := 0
+		while i < len(msgs) - 1 { pmsgs = append(pmsgs, msgs[i])  i = i + 1 }
+		pstart := len(chat_tokens(pmsgs)) - tail_len
+		pend := np - tail_len
+		pool_n = 0
+		i = 0
+		while i < np {
+			if i >= pstart && i < pend {
+				if pool_layer >= 0 {
+					pool_active = 1
+					forward(toks[i], i)
+					pool_active = 0
+				} else {
+					forward(toks[i], i)
+					pool_acc()
+				}
+			} else {
+				forward(toks[i], i)
+			}
+			i = i + 1
+		}
+		if pool_n > 0 {
+			if pool_kind == 2 {
+				i = 0
+				while i < dim { poke_f32(s_pool, i*4, peek_f32(s_pool, i*4) / float(pool_n))  i = i + 1 }
+			}
+			i = 0
+			while i < dim { poke_f32(s_x, i*4, peek_f32(s_pool, i*4))  i = i + 1 }
+		}
 	} else {
-		i := start
-		while i < np { forward(toks[i], i)  i = i + 1 }
+		start := cache_common(toks)
+		if start >= np { start = np - 1 }
+		if np - start >= 16 && quant4 == 0 && pb_enabled == 1 {
+			prefill_batch(toks, start, np)
+		} else {
+			i := start
+			while i < np { forward(toks[i], i)  i = i + 1 }
+		}
+		// ensure s_x holds the normalized hidden at the last prompt position
+		// (the batched prefill leaves it in pb_* buffers, not s_x)
+		forward(toks[np-1], np-1)
 	}
-	// ensure s_x holds the normalized hidden at the last prompt position
-	// (the batched prefill leaves it in pb_* buffers, not s_x)
-	forward(toks[np-1], np-1)
 	i = 0
 	while i < np { poke_i32(cache_buf, i*4, toks[i])  i = i + 1 }
 	cache_len = np
@@ -1144,6 +1181,39 @@ func main() {
 			}
 		}
 		println("gate: " + str(ghead.nr) + " domains -> " + str(len(edomains)) + " expert head(s) (minconf=" + str(gate_minconf) + ")")
+	}
+	// head pooling: ANVIL_POOL=max|mean pools the last user turn's hidden
+	// states instead of the final position. ANVIL_POOL_LAYER picks the tap:
+	// negative counts from the top (-2 default), "final" = post-norm s_x.
+	pool_env := env("ANVIL_POOL")
+	if pool_env == "max" { pool_kind = 1 }
+	if pool_env == "mean" { pool_kind = 2 }
+	if pool_kind > 0 {
+		pl := env("ANVIL_POOL_LAYER")
+		if pl == "final" {
+			pool_layer = -1
+		} else {
+			pi := parse_int(pl)
+			if pi == 0 { pi = -2 }
+			if pi < 0 { pool_layer = n_layers + pi } else { pool_layer = pi }
+			if pool_layer < 0 || pool_layer >= n_layers { println("bad ANVIL_POOL_LAYER " + pl)  exit(1) }
+		}
+		// mhd2 heads declare the pooling they were trained on — a mismatch
+		// serves garbage silently, so warn loudly at boot.
+		want_flags := pool_kind | ((pool_layer + 1) << 4)
+		if hd_flags != 0 && hd_flags != want_flags { println("warn: head " + hd_path + " flags=" + str(hd_flags) + " != ANVIL_POOL config " + str(want_flags)) }
+		if ghead.flags != 0 && ghead.flags != want_flags { println("warn: head " + ghead.path + " flags=" + str(ghead.flags) + " != ANVIL_POOL config " + str(want_flags)) }
+		i := 0
+		while i < len(eheads) {
+			if eheads[i].flags != 0 && eheads[i].flags != want_flags { println("warn: head " + eheads[i].path + " flags=" + str(eheads[i].flags) + " != ANVIL_POOL config " + str(want_flags)) }
+			i = i + 1
+		}
+		i = 0
+		while i < len(thead) {
+			if thead[i].flags != 0 && thead[i].flags != want_flags { println("warn: head " + thead[i].path + " flags=" + str(thead[i].flags) + " != ANVIL_POOL config " + str(want_flags)) }
+			i = i + 1
+		}
+		println("pooling: " + pool_env + " layer=" + str(pool_layer))
 	}
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// model id shown in responses: basename of the model file, or
