@@ -804,6 +804,7 @@ type RouteReq struct {
 	context []string
 	messages []ChatMsg
 	execute bool
+	expert string
 	min_conf float
 	min_gate_conf float
 	max_tokens int
@@ -856,7 +857,32 @@ func handle_route(req) (res) {
 	domain := ""
 	gconf := 0.0
 	expert := ""
-	if len(ghead.names) > 0 {
+	pinned := 0
+	if len(dr.expert) > 0 {
+		// expert pin: a known-domain client (e.g. a game embedding the rpg
+		// head) names its lane and skips the gate — the gate's job is
+		// classifying *mixed-domain* front-door traffic, not re-proving a
+		// domain the caller already knows. Unknown pins are a 400, not a
+		// silent fallthrough.
+		if len(edomains) == 0 {
+			res = ok_json("{\"error\":{\"message\":\"expert pin requires ANVIL_EXPERTS\",\"type\":\"invalid_request_error\"}}")
+			res.status = "400 Bad Request"
+			mu_rel <- 1
+			return
+		}
+		i := 0
+		while i < len(edomains) {
+			if edomains[i] == dr.expert { set_head(eheads[i])  expert = dr.expert  domain = dr.expert  gconf = 1.0  pinned = 1 }
+			i = i + 1
+		}
+		if pinned == 0 {
+			res = ok_json("{\"error\":{\"message\":\"unknown expert: " + json_esc(dr.expert) + "\",\"type\":\"invalid_request_error\"}}")
+			res.status = "400 Bad Request"
+			mu_rel <- 1
+			return
+		}
+	}
+	if pinned == 0 && len(ghead.names) > 0 {
 		// MoE gate: score the domain on the same prefill, then swap in the
 		// expert head for that domain (ANVIL_HEAD default when unmapped).
 		apply_feat(ghead.feat)
@@ -880,7 +906,7 @@ func handle_route(req) (res) {
 			log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"delegate\",\"reason\":\"low_gate_confidence\",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + "}")
 			return
 		}
-	} else {
+	} else if pinned == 0 {
 		apply_tenant_head(req)
 	}
 	best := decide()
@@ -909,13 +935,17 @@ func handle_route(req) (res) {
 		while i < hd_nr { if peek_f32(hd_probs, i*4) > peek_f32(hd_probs, best*4) { best = i }  i = i + 1 }
 	}
 	py := 0.0
-	if nl_nr > 0 {
+	if nl_nr > 0 && pinned == 0 {
+		// noul/score are OOD checks for the open-domain front door. A pinned
+		// request already declared its domain — the expert's own `escalate`
+		// class is the abstention path, and noul (trained on general
+		// traffic) would veto legitimate in-domain phrasing.
 		apply_feat(-1)
 		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
 		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
 	}
 	tier := ""
-	if sc_nr > 0 {
+	if sc_nr > 0 && pinned == 0 {
 		apply_feat(-1)
 		sb := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
 		tier = sc_names[sb]
