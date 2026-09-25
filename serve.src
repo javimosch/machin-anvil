@@ -606,41 +606,37 @@ func head_prefill(state, ctx) (ok) {
 	lk := <-mu_acq
 	lk = lk
 	np := len(toks)
-	if pool_kind > 0 {
+	if len(pt_kinds) > 0 {
 		// pooled heads read a max/mean over the last user turn's token span —
 		// every position must be forwarded (no batch prefill, no prefix-cache
-		// reuse or earlier span positions would go untapped).
+		// reuse or earlier span positions would go untapped). s_x keeps the
+		// last-token hidden; each tap accumulates its own buffer.
 		tail_len := len(chat_tokens([]ChatMsg{})) - 1
 		pmsgs := []ChatMsg{}
 		i := 0
 		while i < len(msgs) - 1 { pmsgs = append(pmsgs, msgs[i])  i = i + 1 }
 		pstart := len(chat_tokens(pmsgs)) - tail_len
 		pend := np - tail_len
-		pool_n = 0
+		pt_reset()
 		i = 0
 		while i < np {
 			if i >= pstart && i < pend {
-				if pool_layer >= 0 {
-					pool_active = 1
-					forward(toks[i], i)
-					pool_active = 0
-				} else {
-					forward(toks[i], i)
-					pool_acc()
+				pool_active = 1
+				forward(toks[i], i)
+				pool_active = 0
+				k := 0
+				while k < len(pt_layers) {
+					if pt_layers[k] >= n_layers { pt_acc(k) }
+					k = k + 1
 				}
 			} else {
 				forward(toks[i], i)
 			}
 			i = i + 1
 		}
-		if pool_n > 0 {
-			if pool_kind == 2 {
-				i = 0
-				while i < dim { poke_f32(s_pool, i*4, peek_f32(s_pool, i*4) / float(pool_n))  i = i + 1 }
-			}
-			i = 0
-			while i < dim { poke_f32(s_x, i*4, peek_f32(s_pool, i*4))  i = i + 1 }
-		}
+		pt_finish()
+		i = 0
+		while i < dim { poke_f32(s_xlast, i*4, peek_f32(s_x, i*4))  i = i + 1 }
 	} else {
 		start := cache_common(toks)
 		if start >= np { start = np - 1 }
@@ -681,6 +677,7 @@ func handle_noul(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	apply_feat(-1)
 	score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
 	mu_rel <- 1
 	py := 0.0
@@ -862,6 +859,7 @@ func handle_route(req) (res) {
 	if len(ghead.names) > 0 {
 		// MoE gate: score the domain on the same prefill, then swap in the
 		// expert head for that domain (ANVIL_HEAD default when unmapped).
+		apply_feat(ghead.feat)
 		gb := score_head(ghead.buf, ghead.nr, ghead.w, ghead.b, ghead.temp, ghead.probs)
 		domain = ghead.names[gb]
 		gconf = peek_f32(ghead.probs, gb*4)
@@ -912,11 +910,13 @@ func handle_route(req) (res) {
 	}
 	py := 0.0
 	if nl_nr > 0 {
+		apply_feat(-1)
 		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
 		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
 	}
 	tier := ""
 	if sc_nr > 0 {
+		apply_feat(-1)
 		sb := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
 		tier = sc_names[sb]
 	}
@@ -1034,7 +1034,7 @@ func handle_route(req) (res) {
 	if len(content) > 0 { body = body + ",\"content\":\"" + json_esc(content) + "\"" }
 	body = body + ",\"latency_ms\":" + str(lat) + "}"
 	res = ok_json(body)
-	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"}")
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\"}")
 	return
 }
 
@@ -1062,11 +1062,12 @@ func handle_assess(req) (res) {
 	best := decide()
 	py := 0.0
 	if nl_nr > 0 {
+		apply_feat(-1)
 		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
 		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
 	}
 	sbest := -1
-	if sc_nr > 0 { sbest = score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs) }
+	if sc_nr > 0 { apply_feat(-1)  sbest = score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs) }
 	mu_rel <- 1
 	body := "{\"object\":\"assess\",\"model\":\"" + model_id + "\",\"decision\":{\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + "}"
 	if nl_nr > 0 {
@@ -1182,38 +1183,57 @@ func main() {
 		}
 		println("gate: " + str(ghead.nr) + " domains -> " + str(len(edomains)) + " expert head(s) (minconf=" + str(gate_minconf) + ")")
 	}
-	// head pooling: ANVIL_POOL=max|mean pools the last user turn's hidden
-	// states instead of the final position. ANVIL_POOL_LAYER picks the tap:
-	// negative counts from the top (-2 default), "final" = post-norm s_x.
+	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
+	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
+	// max|mean overrides all heads to one tap (legacy/global mode); layer via
+	// ANVIL_POOL_LAYER, negative counts from the top (-2 default), "final" =
+	// post-norm s_x.
 	pool_env := env("ANVIL_POOL")
-	if pool_env == "max" { pool_kind = 1 }
-	if pool_env == "mean" { pool_kind = 2 }
-	if pool_kind > 0 {
+	env_kind := 0
+	if pool_env == "max" { env_kind = 1 }
+	if pool_env == "mean" { env_kind = 2 }
+	if env_kind > 0 {
+		el := -2
 		pl := env("ANVIL_POOL_LAYER")
 		if pl == "final" {
-			pool_layer = -1
+			el = n_layers
 		} else {
 			pi := parse_int(pl)
-			if pi == 0 { pi = -2 }
-			if pi < 0 { pool_layer = n_layers + pi } else { pool_layer = pi }
-			if pool_layer < 0 || pool_layer >= n_layers { println("bad ANVIL_POOL_LAYER " + pl)  exit(1) }
+			if pi != 0 { el = pi }
+			if el < 0 { el = n_layers + el }
+			if el < 0 || el > n_layers { println("bad ANVIL_POOL_LAYER " + pl)  exit(1) }
 		}
-		// mhd2 heads declare the pooling they were trained on — a mismatch
-		// serves garbage silently, so warn loudly at boot.
-		want_flags := pool_kind | ((pool_layer + 1) << 4)
+		envi := pt_register(env_kind, el)
+		// the env forces every loaded head onto this one tap — a mismatch with
+		// a head's declared flags serves garbage silently, so warn loudly.
+		want_flags := env_kind | ((el + 1) << 4)
+		hd_feat = envi
+		def_head.feat = envi
 		if hd_flags != 0 && hd_flags != want_flags { println("warn: head " + hd_path + " flags=" + str(hd_flags) + " != ANVIL_POOL config " + str(want_flags)) }
-		if ghead.flags != 0 && ghead.flags != want_flags { println("warn: head " + ghead.path + " flags=" + str(ghead.flags) + " != ANVIL_POOL config " + str(want_flags)) }
+		if len(ghead.names) > 0 {
+			ghead.feat = envi
+			if ghead.flags != 0 && ghead.flags != want_flags { println("warn: head " + ghead.path + " flags=" + str(ghead.flags) + " != ANVIL_POOL config " + str(want_flags)) }
+		}
 		i := 0
 		while i < len(eheads) {
+			eheads[i].feat = envi
 			if eheads[i].flags != 0 && eheads[i].flags != want_flags { println("warn: head " + eheads[i].path + " flags=" + str(eheads[i].flags) + " != ANVIL_POOL config " + str(want_flags)) }
 			i = i + 1
 		}
 		i = 0
 		while i < len(thead) {
+			thead[i].feat = envi
 			if thead[i].flags != 0 && thead[i].flags != want_flags { println("warn: head " + thead[i].path + " flags=" + str(thead[i].flags) + " != ANVIL_POOL config " + str(want_flags)) }
 			i = i + 1
 		}
-		println("pooling: " + pool_env + " layer=" + str(pool_layer))
+		println("pooling: " + pool_env + " layer=" + str(el) + " (env override on all heads)")
+	}
+	if len(pt_kinds) > 0 && env_kind == 0 {
+		i := 0
+		while i < len(pt_kinds) {
+			println("pool tap: kind=" + str(pt_kinds[i]) + " layer=" + str(pt_layers[i]))
+			i = i + 1
+		}
 	}
 	if tok_l3 == 1 { model_id = "llama-3.2-1b-instruct-q80" }
 	// model id shown in responses: basename of the model file, or

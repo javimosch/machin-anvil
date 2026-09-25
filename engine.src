@@ -70,33 +70,78 @@ var hd_names = []string{}
 var hd_probs = 0   // alloc'd [nr] f32 scratch
 var hd_path = ""   // path of the currently loaded head (tenant swaps re-load)
 var hd_flags = 0   // mhd2 feature flags (0 = mhd1 last-token)
+var hd_feat = -1   // feature tap index for the loaded head (-1 = last-token)
 
-// hidden-state pooling for head decisions (ANVIL_POOL): heads can read a
-// max/mean pool over the last user turn's hidden span instead of the final
-// position. pool_layer >= 0 taps the residual stream inside forward (a layer
-// index); -1 taps the post-final-norm s_x.
-var s_pool = 0       // dim-float accumulator
+// hidden-state pooling for head decisions: each mhd2 head declares the
+// (kind, layer) tap it was trained on in its flags; distinct configs get one
+// dim-float accumulator each. layer < n_layers taps the residual stream
+// inside forward; layer >= n_layers taps the post-final-norm s_x.
+var s_xlast = 0      // last-token feature snapshot (restore point for mhd1 heads)
 var pool_active = 0  // hook enable, set by head_prefill per position
-var pool_layer = -1
-var pool_kind = 0    // 0 off, 1 max, 2 mean
-var pool_n = 0       // positions accumulated this prefill
+var pt_kinds = []int{}
+var pt_layers = []int{}
+var pt_bufs = []int{}
+var pt_ns = []int{}
 
-// accumulate the current residual stream into s_pool (first position
-// initializes; max keeps elementwise max, mean sums for the later divide).
-func pool_acc() {
+func pt_register(kind, layer) (idx) {
+	idx = 0
+	while idx < len(pt_kinds) {
+		if pt_kinds[idx] == kind && pt_layers[idx] == layer { return }
+		idx = idx + 1
+	}
+	pt_kinds = append(pt_kinds, kind)
+	pt_layers = append(pt_layers, layer)
+	pt_bufs = append(pt_bufs, alloc(dim * 4))
+	pt_ns = append(pt_ns, 0)
+	return
+}
+
+func pt_reset() {
 	i := 0
-	if pool_n == 0 {
-		while i < dim { poke_f32(s_pool, i*4, peek_f32(s_x, i*4))  i = i + 1 }
-	} else if pool_kind == 1 {
+	while i < len(pt_ns) { pt_ns[i] = 0  i = i + 1 }
+	return
+}
+
+// accumulate the current residual stream into tap k (first position
+// initializes; max keeps elementwise max, mean sums for the later divide).
+func pt_acc(k) {
+	i := 0
+	if pt_ns[k] == 0 {
+		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(s_x, i*4))  i = i + 1 }
+	} else if pt_kinds[k] == 1 {
 		while i < dim {
 			v := peek_f32(s_x, i*4)
-			if v > peek_f32(s_pool, i*4) { poke_f32(s_pool, i*4, v) }
+			if v > peek_f32(pt_bufs[k], i*4) { poke_f32(pt_bufs[k], i*4, v) }
 			i = i + 1
 		}
 	} else {
-		while i < dim { poke_f32(s_pool, i*4, peek_f32(s_pool, i*4) + peek_f32(s_x, i*4))  i = i + 1 }
+		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(pt_bufs[k], i*4) + peek_f32(s_x, i*4))  i = i + 1 }
 	}
-	pool_n = pool_n + 1
+	pt_ns[k] = pt_ns[k] + 1
+	return
+}
+
+// divide mean taps by their position count at end of prefill.
+func pt_finish() {
+	k := 0
+	while k < len(pt_kinds) {
+		if pt_kinds[k] == 2 && pt_ns[k] > 0 {
+			i := 0
+			while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(pt_bufs[k], i*4) / float(pt_ns[k]))  i = i + 1 }
+		}
+		k = k + 1
+	}
+	return
+}
+
+// copy the feature a head was trained on into s_x: its pooled tap buffer,
+// or the last-token snapshot for mhd1/last-token heads.
+func apply_feat(fi) {
+	if len(pt_kinds) == 0 { return }
+	src := s_xlast
+	if fi >= 0 && fi < len(pt_bufs) { src = pt_bufs[fi] }
+	i := 0
+	while i < dim { poke_f32(s_x, i*4, peek_f32(src, i*4))  i = i + 1 }
 	return
 }
 
@@ -113,6 +158,7 @@ type Head struct {
 	probs int
 	path string
 	flags int
+	feat int
 }
 
 func read_head(path) (h) {
@@ -128,8 +174,12 @@ func read_head(path) (h) {
 	h.temp = f32_at(b, 12)
 	if hd_dimv != dim { println("head dim " + str(hd_dimv) + " != model dim " + str(dim))  exit(1) }
 	h.flags = 0
+	h.feat = -1
 	hoff := 16
-	if mg == 845441133 { h.flags = read_i32(b, 16)  hoff = 20 }
+	if mg == 845441133 { h.flags = read_i32(b, 16)  hoff = 20
+		k := h.flags & 15  lay := (h.flags >> 4) - 1
+		if k > 0 && lay >= 0 { h.feat = pt_register(k, lay) }
+	}
 	h.buf = bytes_to_buf(b)
 	h.w = hoff
 	h.b = h.w + h.nr * dim * 4
@@ -150,6 +200,7 @@ func read_head(path) (h) {
 func set_head(h) {
 	hd_buf = h.buf  hd_nr = h.nr  hd_temp = h.temp  hd_w = h.w  hd_b = h.b
 	hd_names = h.names  hd_probs = h.probs  hd_path = h.path  hd_flags = h.flags
+	hd_feat = h.feat
 	return
 }
 
@@ -158,6 +209,7 @@ func cur_head() (h) {
 	h = Head{}
 	h.buf = hd_buf  h.nr = hd_nr  h.temp = hd_temp  h.w = hd_w  h.b = hd_b
 	h.names = hd_names  h.probs = hd_probs  h.path = hd_path  h.flags = hd_flags
+	h.feat = hd_feat
 	return
 }
 
@@ -192,6 +244,7 @@ func score_head(buf, nr, woff, boff, temp, probs) (best) {
 
 // run the route head on s_x -> hd_probs[i] = p(route_i); returns best index.
 func decide() (best) {
+	apply_feat(hd_feat)
 	best = score_head(hd_buf, hd_nr, hd_w, hd_b, hd_temp, hd_probs)
 	return
 }
@@ -368,7 +421,7 @@ func alloc_state() {
 	s_x = alloc(dim * 4)
 	s_xb = alloc(dim * 4)
 	s_xb2 = alloc(dim * 4)
-	s_pool = alloc(dim * 4)
+	s_xlast = alloc(dim * 4)
 	s_hb = alloc(hidden_dim * 4)
 	s_hb2 = alloc(hidden_dim * 4)
 	s_q = alloc(dim * 4)
@@ -978,7 +1031,13 @@ func forward(token, pos) {
 			poke_f32(s_x, i*4, peek_f32(s_x, i*4) + peek_f32(s_xb, i*4))
 			i = i + 1
 		}
-		if pool_active == 1 && l == pool_layer { pool_acc() }
+		if pool_active == 1 {
+			pi := 0
+			while pi < len(pt_layers) {
+				if pt_layers[pi] == l { pt_acc(pi) }
+				pi = pi + 1
+			}
+		}
 		l = l + 1
 	}
 	rmsnorm(s_x, s_x, wbuf + w_rms_final, dim)
