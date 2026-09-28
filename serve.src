@@ -1198,20 +1198,24 @@ func main() {
 		if len(tkeys) == 0 { def_head = cur_head() }
 		gm := parse_float(env("ANVIL_GATE_MINCONF"))
 		if gm > 0.0 { gate_minconf = gm }
-		ex := env("ANVIL_EXPERTS")
-		if len(ex) > 0 {
-			xp := split(ex, ",")
-			i := 0
-			while i < len(xp) {
-				sep := index(xp[i], ":")
-				if sep > 0 {
-					edomains = append(edomains, trim(substr(xp[i], 0, sep)))
-					eheads = append(eheads, read_head(trim(substr(xp[i], sep + 1, len(xp[i])))))
-				}
-				i = i + 1
-			}
-		}
 		println("gate: " + str(ghead.nr) + " domains -> " + str(len(edomains)) + " expert head(s) (minconf=" + str(gate_minconf) + ")")
+	}
+	// experts register with or without a gate: a pinned-only deployment
+	// (ANVIL_EXPERTS="acme:acme.head", no gate) serves known-domain clients
+	// that never send mixed traffic.
+	ex := env("ANVIL_EXPERTS")
+	if len(ex) > 0 {
+		xp := split(ex, ",")
+		i := 0
+		while i < len(xp) {
+			sep := index(xp[i], ":")
+			if sep > 0 {
+				edomains = append(edomains, trim(substr(xp[i], 0, sep)))
+				eheads = append(eheads, read_head(trim(substr(xp[i], sep + 1, len(xp[i])))))
+			}
+			i = i + 1
+		}
+		println("experts: " + str(len(edomains)) + " pinned lane(s)")
 	}
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
