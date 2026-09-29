@@ -45,3 +45,4 @@ bonsai17_cli.mfl
 serve_bonsai17
 serve_bonsai17.mfl
 anvil-serve
+anvil-serve-*
