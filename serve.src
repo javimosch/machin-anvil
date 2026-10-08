@@ -386,6 +386,42 @@ func handle_models() (res) {
 	return
 }
 
+// GET /guide — cli-guide-spec: the embedded operator manual as JSON, so an
+// agent that finds this binary serving on a port can learn the whole surface
+// without external docs. Dynamic fields report what THIS instance loaded.
+func handle_guide() (res) {
+	g := "{\"name\":\"anvil-serve\",\"spec\":\"cli-guide-spec\",\"model\":\"" + model_id + "\","
+	g = g + "\"overview\":\"OpenAI-compatible inference + typed decision heads on a frozen trunk. Heads are small linear classifiers over pooled hidden states (mhd1/mhd2/mhd3) scored in the same forward pass — decisions cost ~one prefill, no generation.\","
+	g = g + "\"endpoints\":["
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/route\",\"doc\":\"dispatcher: gate -> expert head -> noul/score -> optional execute. body: {state|messages, context[], expert?, options[], min_conf?, min_gate_conf?, execute?}\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/decide\",\"doc\":\"route head only. body: {state|messages, context[]}\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/noul\",\"doc\":\"escalation yes/no head\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/score\",\"doc\":\"complexity tier 1-4\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/assess\",\"doc\":\"decide+noul+score in one call\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"doc\":\"generative path, OpenAI-compatible, SSE stream\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/v1/models\",\"doc\":\"model id\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/health\",\"doc\":\"liveness (alias /_health)\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
+	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
+	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
+	g = g + "\"gotchas\":[\"expert pin skips gate AND noul/score — the expert's own 'escalate' class is its abstention path\",\"pooled heads reject prompts >context with 400\",\"kind-0 'last' taps are the final-layer snapshot only\",\"per-request min_conf beats every env floor\"],"
+	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
+	res = ok_json(g)
+	return
+}
+
+// GET /llms.txt — one-screen plain-text summary for agents.
+func handle_llms() (res) {
+	t := "anvil-serve (machin-anvil) — typed decision layer + OpenAI-compatible inference, pure MFL.\n"
+	t = t + "POST /v1/route {state} -> {action: tool_call|delegate|generate, route, confidence, domain, expert}\n"
+	t = t + "POST /v1/decide|noul|score|assess — individual heads. POST /v1/chat/completions — generative.\n"
+	t = t + "GET /guide for the full JSON manual, /health for liveness. Expert pin: body.expert=<domain>.\n"
+	t = t + "Delegation is a feature: low conf, escalate route, noul veto, or head/trunk disagreement all return action=delegate — route to a bigger model or human, never guess.\n"
+	res = ok_text(t)
+	return
+}
+
 func parse_chat_req(body) (cr, err) {
 	err = ""
 	cr = parse(body, ChatReq{})
@@ -1155,6 +1191,9 @@ func api_route(req) (res) {
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
+	if req.method == "GET" && req.path == "/_health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
+	if req.method == "GET" && req.path == "/guide" { res = handle_guide()  return }
+	if req.method == "GET" && req.path == "/llms.txt" { res = handle_llms()  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
 	return
