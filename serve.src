@@ -623,10 +623,12 @@ func head_prefill(state, ctx) (ok) {
 		has_post := 0
 		k := 0
 		while k < len(pt_layers) { if pt_layers[k] >= n_layers { has_post = 1 }  k = k + 1 }
-		// no prefix-cache reuse here: the KV cache may hold rows from a
-		// request whose divergence point falls inside this prompt's pooled
-		// span, which would silently corrupt tap features. Forward from 0.
-		start := 0
+		// prefix-cache reuse is safe only up to the pooled span: every
+		// position in [pstart, pend) must be (re)forwarded or tap features
+		// go stale. Clamp the reuse boundary at pstart.
+		start := cache_common(toks)
+		if start > pstart { start = pstart }
+		if start >= np { start = np - 1 }
 		if has_post == 0 && np - start >= 16 && quant4 == 0 && pb_enabled == 1 {
 			pb_pool = 1  pb_ps = pstart  pb_pe = pend
 			head_prefill_batch(toks, start, np)
