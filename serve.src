@@ -618,25 +618,40 @@ func head_prefill(state, ctx) (ok) {
 		pstart := len(chat_tokens(pmsgs)) - tail_len
 		pend := np - tail_len
 		pt_reset()
-		i = 0
-		while i < np {
-			if i >= pstart && i < pend {
-				pool_active = 1
-				forward(toks[i], i)
-				pool_active = 0
-				k := 0
-				while k < len(pt_layers) {
-					if pt_layers[k] >= n_layers { pt_acc(k) }
-					k = k + 1
+		// post-final-layer taps (layer >= n_layers) can't come from pb_x rows
+		// in the batched path — fall back to the sequential loop for those.
+		has_post := 0
+		k := 0
+		while k < len(pt_layers) { if pt_layers[k] >= n_layers { has_post = 1 }  k = k + 1 }
+		// no prefix-cache reuse here: the KV cache may hold rows from a
+		// request whose divergence point falls inside this prompt's pooled
+		// span, which would silently corrupt tap features. Forward from 0.
+		start := 0
+		if has_post == 0 && np - start >= 16 && quant4 == 0 && pb_enabled == 1 {
+			pb_pool = 1  pb_ps = pstart  pb_pe = pend
+			head_prefill_batch(toks, start, np)
+			pb_pool = 0
+		} else {
+			i = start
+			while i < np {
+				if i >= pstart && i < pend {
+					pool_active = 1
+					forward(toks[i], i)
+					pool_active = 0
+					k = 0
+					while k < len(pt_layers) {
+						if pt_layers[k] >= n_layers { pt_acc(k) }
+						k = k + 1
+					}
+				} else {
+					forward(toks[i], i)
 				}
-			} else {
-				forward(toks[i], i)
+				i = i + 1
 			}
-			i = i + 1
+			i = 0
+			while i < dim { poke_f32(s_xlast, i*4, peek_f32(s_x, i*4))  i = i + 1 }
 		}
 		pt_finish()
-		i = 0
-		while i < dim { poke_f32(s_xlast, i*4, peek_f32(s_x, i*4))  i = i + 1 }
 	} else {
 		start := cache_common(toks)
 		if start >= np { start = np - 1 }

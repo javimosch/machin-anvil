@@ -108,17 +108,24 @@ func pt_reset() {
 // accumulate the current residual stream into tap k (first position
 // initializes; max keeps elementwise max, mean sums for the later divide).
 func pt_acc(k) {
+	pt_acc_row(k, s_x)
+	return
+}
+
+// accumulate residual stream at ptr into tap k — used by the batched pooled
+// prefill to tap pb_x rows directly.
+func pt_acc_row(k, ptr) {
 	i := 0
 	if pt_ns[k] == 0 {
-		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(s_x, i*4))  i = i + 1 }
+		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(ptr, i*4))  i = i + 1 }
 	} else if pt_kinds[k] == 1 {
 		while i < dim {
-			v := peek_f32(s_x, i*4)
+			v := peek_f32(ptr, i*4)
 			if v > peek_f32(pt_bufs[k], i*4) { poke_f32(pt_bufs[k], i*4, v) }
 			i = i + 1
 		}
 	} else {
-		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(pt_bufs[k], i*4) + peek_f32(s_x, i*4))  i = i + 1 }
+		while i < dim { poke_f32(pt_bufs[k], i*4, peek_f32(pt_bufs[k], i*4) + peek_f32(ptr, i*4))  i = i + 1 }
 	}
 	pt_ns[k] = pt_ns[k] + 1
 	return
@@ -679,6 +686,9 @@ func attn_head(h, l, pos) {
 // O(n^2)) is parallelized over head x position.
 var pb_tile = 256
 var pb_enabled = 1  // COLIBRI_NOBATCH=1 forces per-token prefill (A/B correctness)
+var pb_pool = 0     // 1 = accumulate pooled taps during batch_layers
+var pb_ps = 0       // pooled span start (absolute position)
+var pb_pe = 0       // pooled span end (absolute position)
 var prof_qkv = 0
 var prof_attn = 0
 var prof_o = 0
@@ -1293,6 +1303,20 @@ func batch_layers(B) {
 		dispatch_rows(23, l, 0, B)  barrier()          // silu*w3 + quant
 		dispatch_rows(17, l, 0, dim)  barrier()        // w2 -> pb_xb
 		dispatch_rows(24, l, 0, B)  barrier()          // residual x += xb
+		if pb_pool == 1 {
+			// pooled taps: accumulate this tile's rows that fall inside the
+			// pooled span [pb_ps, pb_pe) into any tap registered on layer l.
+			pi := 0
+			while pi < len(pt_layers) {
+				if pt_layers[pi] == l {
+					lo := pb_ps - pb_tstart  if lo < 0 { lo = 0 }
+					hi := pb_pe - pb_tstart  if hi > B { hi = B }
+					b := lo
+					while b < hi { pt_acc_row(pi, pb_x + b*dim*4)  b = b + 1 }
+				}
+				pi = pi + 1
+			}
+		}
 		l = l + 1
 	}
 }
@@ -1317,6 +1341,33 @@ func prefill_batch(toks, start, np) {
 	rmsnorm(s_x, s_x, wbuf + w_rms_final, dim)
 	quantize_act(s_xq, s_xq_s, s_x, dim)
 	dispatch_rows(7, 0, 0, vocab_size)  barrier()
+}
+
+// batched prefill for head-only requests: same tiled layer pass as
+// prefill_batch but no logits dispatch (heads only need pb_x taps + the last
+// residual). Requires pb_pool/pb_ps/pb_pe set by the caller.
+func head_prefill_batch(toks, start, np) {
+	ts := start
+	while ts < np {
+		te := ts + pb_tile
+		if te > np { te = np }
+		B := te - ts
+		pb_B = B
+		pb_tstart = ts
+		b := 0
+		while b < B { embed_to(toks[ts+b], pb_x + b*dim*4)  b = b + 1 }
+		batch_layers(B)
+		ts = te
+	}
+	// last position's residual -> s_x and s_xlast (kind-0 mhd3 taps + apply_feat)
+	lr := np - 1 - pb_tstart
+	i := 0
+	while i < dim {
+		v := peek_f32(pb_x + lr*dim*4, i*4)
+		poke_f32(s_x, i*4, v)  poke_f32(s_xlast, i*4, v)
+		i = i + 1
+	}
+	return
 }
 
 // ---- speculative decoding (prompt-lookup): draft k tokens from n-gram matches
