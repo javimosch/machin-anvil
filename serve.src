@@ -1424,6 +1424,12 @@ func main() {
 	while w < n_workers { go worker(jobs, done)  w = w + 1 }
 	go mutex_srv(mu_acq, mu_rel)
 	println("colibri serve: model=" + model_id + " dim=" + str(dim) + " layers=" + str(n_layers) + " workers=" + str(n_workers) + " skills=" + str(len(skills)) + " loaded in " + str(now_ms() - t0) + " ms")
-	println("OpenAI-compatible API on http://0.0.0.0:" + str(port) + "/v1")
-	serve(port, func(req) { return api_route(req) })
+	// ANVIL_BIND=<addr> binds a specific interface (e.g. 127.0.0.1 when the
+	// mtlm-router wrapper runs the daemon loopback-only by default); unset =
+	// the historical appliance-wide 0.0.0.0.
+	bind := env("ANVIL_BIND")
+	if len(bind) == 0 { bind = "0.0.0.0" }
+	println("OpenAI-compatible API on http://" + bind + ":" + str(port) + "/v1")
+	flush()
+	serve_on_quiet(bind, port, func(req) { return api_route(req) })
 }
