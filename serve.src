@@ -401,12 +401,14 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"doc\":\"generative path, OpenAI-compatible, SSE stream\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/models\",\"doc\":\"model id\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/whoami\",\"doc\":\"masked key identity + tenant head + expert lanes\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/feedback\",\"doc\":\"open submit {message,kind?,context?,reporter?,id?} — idempotent on id, 16KB cap, 30/min/ip\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/v1/feedback\",\"doc\":\"admin-gated read (valid ANVIL_KEYS bearer), ?limit=n\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/_shutdown\",\"doc\":\"token-gated (or loopback-only without keys) shutdown\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/health\",\"doc\":\"liveness (alias /_health)\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
-	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
+	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
 	g = g + "\"gotchas\":[\"expert pin skips gate AND noul/score — the expert's own 'escalate' class is its abstention path\",\"pooled heads reject prompts >context with 400\",\"kind-0 'last' taps are the final-layer snapshot only\",\"per-request min_conf beats every env floor\"],"
 	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
 	res = ok_json(g)
@@ -1230,7 +1232,94 @@ func handle_assess(req) (res) {
 	return
 }
 
+var fb_log = ""
+var fb_ips = []string{}
+var fb_ts = []int{}
+var fb_seq = 0
+
+// POST /v1/feedback — cli-feedback-spec: open submit, size cap + per-IP
+// rate limit, idempotent on client "id" (jsonl store at ANVIL_FEEDBACK_LOG).
+// GET /v1/feedback is admin-gated (any valid ANVIL_KEYS bearer), 403 off.
+func handle_feedback(req) (res) {
+	if req.method == "GET" {
+		if len(api_keys) == 0 || auth_ok(req) == 0 {
+			res = ok_json("{\"ok\":false,\"error\":\"feedback reads are admin-gated\"}")
+			res.status = "403 Forbidden"
+			return
+		}
+		content := read_file(fb_log)
+		items := ""
+		lines := split(content, "\n")
+		lim := parse_int(query(req, "limit"))
+		if lim <= 0 { lim = 50 }
+		i := len(lines) - 1
+		n := 0
+		while i >= 0 && n < lim {
+			if len(lines[i]) > 0 {
+				if len(items) > 0 { items = "," + items }
+				items = lines[i] + items
+				n = n + 1
+			}
+			i = i - 1
+		}
+		res = ok_json("{\"ok\":true,\"items\":[" + items + "]}")
+		return
+	}
+	if len(req.body) > 16384 {
+		res = ok_json("{\"ok\":false,\"error\":\"body exceeds 16384 bytes\"}")
+		res.status = "413 Payload Too Large"
+		return
+	}
+	now := now_ms()
+	// sliding 60s per-IP window, 30/min
+	nips := []string{}
+	nts := []int{}
+	cnt := 0
+	i := 0
+	while i < len(fb_ips) {
+		if now - fb_ts[i] < 60000 {
+			nips = append(nips, fb_ips[i])  nts = append(nts, fb_ts[i])
+			if fb_ips[i] == req.remote { cnt = cnt + 1 }
+		}
+		i = i + 1
+	}
+	fb_ips = nips  fb_ts = nts
+	if cnt >= 30 {
+		res = ok_json("{\"ok\":false,\"error\":\"rate limit: 30/min per ip\"}")
+		res.status = "429 Too Many Requests"
+		return
+	}
+	mraw, merr := json_get(req.body, ".message")
+	msg := unq(mraw)
+	if len(merr) > 0 || len(trim(msg)) == 0 {
+		res = ok_json("{\"ok\":false,\"error\":\"message required\"}")
+		res.status = "400 Bad Request"
+		return
+	}
+	fb_ips = append(fb_ips, req.remote)  fb_ts = append(fb_ts, now)
+	fid := unq(jget_any(req.body, []string{".id"}))
+	if len(fid) == 0 {
+		fid = "fb-" + str(now) + "-" + str(fb_seq)
+		fb_seq = fb_seq + 1
+	}
+	// idempotent: a stored id is a success no-op, never a duplicate row
+	if index(read_file(fb_log), "\"id\":\"" + fid + "\"") >= 0 {
+		res = ok_json("{\"ok\":true,\"id\":\"" + json_esc(fid) + "\",\"stored\":true}")
+		return
+	}
+	kind := unq(jget_any(req.body, []string{".kind"}))
+	if len(kind) == 0 { kind = "note" }
+	line := "{\"id\":\"" + json_esc(fid) + "\",\"app\":\"mtlm-router\",\"version\":\"" + unq(jget_any(req.body, []string{".version"})) + "\",\"kind\":\"" + json_esc(kind) + "\",\"message\":\"" + json_esc(msg) + "\",\"context\":\"" + json_esc(unq(jget_any(req.body, []string{".context"}))) + "\",\"reporter\":\"" + json_esc(unq(jget_any(req.body, []string{".reporter"}))) + "\",\"remote\":\"" + req.remote + "\",\"ts\":" + str(now) + "}"
+	off := file_size(fb_log)
+	if off < 0 { off = 0 }
+	write_file_at(fb_log, off, bytes(line + "\n"))
+	res = ok_json("{\"ok\":true,\"id\":\"" + json_esc(fid) + "\",\"stored\":true}")
+	return
+}
+
 func api_route(req) (res) {
+	if req.method == "POST" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
+	if req.method == "GET" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
 	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
 		res.status = "401 Unauthorized"
@@ -1286,6 +1375,8 @@ func main() {
 	sp := env("ANVIL_SCORE")
 	if len(sp) > 0 { load_score(sp) }
 	decide_log = env("ANVIL_LOG")
+	fb_log = env("ANVIL_FEEDBACK_LOG")
+	if len(fb_log) == 0 { fb_log = "feedback.jsonl" }
 	delegate_url = env("ANVIL_DELEGATE_URL")
 	delegate_key = env("ANVIL_DELEGATE_KEY")
 	delegate_model = env("ANVIL_DELEGATE_MODEL")
