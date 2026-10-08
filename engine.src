@@ -71,6 +71,9 @@ var hd_probs = 0   // alloc'd [nr] f32 scratch
 var hd_path = ""   // path of the currently loaded head (tenant swaps re-load)
 var hd_flags = 0   // mhd2 feature flags (0 = mhd1 last-token)
 var hd_feat = -1   // feature tap index for the loaded head (-1 = last-token)
+var hd_feats = []int{}  // mhd3: tap indices to concatenate (empty = single feature)
+var hd_featdim = 0 // mhd3: total feature width (ntaps * dim)
+var hd_fbuf = 0    // mhd3: permanent concat scratch, allocated at head load
 
 // hidden-state pooling for head decisions: each mhd2 head declares the
 // (kind, layer) tap it was trained on in its flags; distinct configs get one
@@ -145,6 +148,18 @@ func apply_feat(fi) {
 	return
 }
 
+// mhd3: concatenate the head's declared tap buffers into dst, in file order.
+func build_feat(feats, dst) {
+	t := 0
+	while t < len(feats) {
+		src := pt_bufs[feats[t]]
+		i := 0
+		while i < dim { poke_f32(dst, t*dim*4+i*4, peek_f32(src, i*4))  i = i + 1 }
+		t = t + 1
+	}
+	return
+}
+
 // a parsed head bundle — tenant heads are read once at startup (main
 // goroutine arena = permanent) and swapped in per-request by set_head, since
 // anything allocated inside a request handler dies with that goroutine.
@@ -159,6 +174,9 @@ type Head struct {
 	path string
 	flags int
 	feat int
+	feats []int
+	featdim int
+	fbuf int
 }
 
 func read_head(path) (h) {
@@ -168,21 +186,39 @@ func read_head(path) (h) {
 	mg := read_i32(b, 0)
 	// "mhd1" = 0x3164686d, "mhd2" = 0x3264686d (LE); mhd2 adds a u32 flags
 	// word after temp: flags = pool_kind | ((layer + 1) << 4), 0 = last-token.
-	if mg != 828663917 && mg != 845441133 { println("bad head magic in " + path)  exit(1) }
+	// "mhd3" = 0x3364686d: multi-tap — header is u8 ntaps then ntaps pairs of
+	// u8 pool_kind + u8 (layer + 1); featdim = ntaps * model dim; the feature
+	// is the concatenation of the taps in file order.
+	if mg != 828663917 && mg != 845441133 && mg != 862218349 { println("bad head magic in " + path)  exit(1) }
 	h.nr = read_i32(b, 4)
 	hd_dimv := read_i32(b, 8)
 	h.temp = f32_at(b, 12)
-	if hd_dimv != dim { println("head dim " + str(hd_dimv) + " != model dim " + str(dim))  exit(1) }
 	h.flags = 0
 	h.feat = -1
+	h.feats = []int{}
 	hoff := 16
-	if mg == 845441133 { h.flags = read_i32(b, 16)  hoff = 20
-		k := h.flags & 15  lay := (h.flags >> 4) - 1
-		if k > 0 && lay >= 0 { h.feat = pt_register(k, lay) }
+	if mg == 862218349 {
+		ntaps := byte_at(b, 16)
+		hoff = 17 + ntaps * 2
+		if hd_dimv != ntaps * dim { println("head featdim " + str(hd_dimv) + " != ntaps*dim in " + path)  exit(1) }
+		i := 0
+		while i < ntaps {
+			k := byte_at(b, 17 + i*2)  lay := byte_at(b, 18 + i*2) - 1
+			if k < 1 || k > 2 || lay < 0 { println("bad mhd3 tap spec in " + path)  exit(1) }
+			h.feats = append(h.feats, pt_register(k, lay))
+			i = i + 1
+		}
+	} else {
+		if hd_dimv != dim { println("head dim " + str(hd_dimv) + " != model dim " + str(dim))  exit(1) }
+		if mg == 845441133 { h.flags = read_i32(b, 16)  hoff = 20
+			k := h.flags & 15  lay := (h.flags >> 4) - 1
+			if k > 0 && lay >= 0 { h.feat = pt_register(k, lay) }
+		}
 	}
+	h.featdim = hd_dimv
 	h.buf = bytes_to_buf(b)
 	h.w = hoff
-	h.b = h.w + h.nr * dim * 4
+	h.b = h.w + h.nr * hd_dimv * 4
 	h.path = path
 	h.names = []string{}
 	off := h.b + h.nr * 4
@@ -194,13 +230,15 @@ func read_head(path) (h) {
 		i = i + 1
 	}
 	h.probs = alloc(h.nr * 4)
+	h.fbuf = 0
+	if len(h.feats) > 0 { h.fbuf = alloc(h.featdim * 4) }
 	return
 }
 
 func set_head(h) {
 	hd_buf = h.buf  hd_nr = h.nr  hd_temp = h.temp  hd_w = h.w  hd_b = h.b
 	hd_names = h.names  hd_probs = h.probs  hd_path = h.path  hd_flags = h.flags
-	hd_feat = h.feat
+	hd_feat = h.feat  hd_feats = h.feats  hd_featdim = h.featdim  hd_fbuf = h.fbuf
 	return
 }
 
@@ -209,7 +247,7 @@ func cur_head() (h) {
 	h = Head{}
 	h.buf = hd_buf  h.nr = hd_nr  h.temp = hd_temp  h.w = hd_w  h.b = hd_b
 	h.names = hd_names  h.probs = hd_probs  h.path = hd_path  h.flags = hd_flags
-	h.feat = hd_feat
+	h.feat = hd_feat  h.feats = hd_feats  h.featdim = hd_featdim  h.fbuf = hd_fbuf
 	return
 }
 
@@ -219,16 +257,17 @@ func load_head(path) {
 	return
 }
 
-// generic head scorer: softmax(buf: W,b over s_x, temperature) -> probs[i];
-// returns best index. Works for the route head (hd_*) and the noul head (nl_*).
-func score_head(buf, nr, woff, boff, temp, probs) (best) {
+// generic head scorer: softmax(buf: W,b over the feature at fptr of width
+// fdim, temperature) -> probs[i]; returns best index. Works for the route
+// head (hd_*) and the noul head (nl_*).
+func score_head2(buf, nr, woff, boff, temp, probs, fptr, fdim) (best) {
 	best = 0
 	mx := -1e30
 	i := 0
 	while i < nr {
 		acc := peek_f32(buf, boff + i*4)
 		j := 0
-		while j < dim { acc = acc + peek_f32(buf, woff + (i*dim + j)*4) * peek_f32(s_x, j*4)  j = j + 1 }
+		while j < fdim { acc = acc + peek_f32(buf, woff + (i*fdim + j)*4) * peek_f32(fptr, j*4)  j = j + 1 }
 		v := acc / temp
 		poke_f32(probs, i*4, v)
 		if v > mx { mx = v  best = i }
@@ -242,10 +281,29 @@ func score_head(buf, nr, woff, boff, temp, probs) (best) {
 	return
 }
 
-// run the route head on s_x -> hd_probs[i] = p(route_i); returns best index.
+func score_head(buf, nr, woff, boff, temp, probs) (best) {
+	best = score_head2(buf, nr, woff, boff, temp, probs, s_x, dim)
+	return
+}
+
+// score a Head bundle: builds its declared feature (single tap or mhd3
+// concat) and returns the argmax route index with h.probs filled.
+func head_best(h) (best) {
+	if len(h.feats) > 0 {
+		build_feat(h.feats, h.fbuf)
+		best = score_head2(h.buf, h.nr, h.w, h.b, h.temp, h.probs, h.fbuf, h.featdim)
+	} else {
+		apply_feat(h.feat)
+		best = score_head2(h.buf, h.nr, h.w, h.b, h.temp, h.probs, s_x, dim)
+	}
+	return
+}
+
+// run the route head on the last prefill -> hd_probs[i] = p(route_i);
+// returns best index.
 func decide() (best) {
-	apply_feat(hd_feat)
-	best = score_head(hd_buf, hd_nr, hd_w, hd_b, hd_temp, hd_probs)
+	h := cur_head()
+	best = head_best(h)
 	return
 }
 
