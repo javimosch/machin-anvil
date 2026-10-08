@@ -408,9 +408,9 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
-	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
+	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_EXPERT_QHAT=dom:0.648,... / ANVIL_CONFORMAL_QHAT (conformal gate, replaces minconf floor on the lane)\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
 	g = g + "\"gotchas\":[\"expert pin skips gate AND noul/score — the expert's own 'escalate' class is its abstention path\",\"pooled heads reject prompts >context with 400\",\"kind-0 'last' taps are the final-layer snapshot only\",\"per-request min_conf beats every env floor\"],"
-	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
+	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|conformal_abstain|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
 	res = ok_json(g)
 	return
 }
@@ -622,6 +622,9 @@ var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
 var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
 var emin_vals = []float{}   //   confidence floor; overrides the global floor
+var cq_names = []string{}   // ANVIL_EXPERT_QHAT="mairie_c:0.648,..." — per-lane
+var cq_vals = []float{}     //   conformal qhat (set = {p >= 1-qhat}); 0=off
+var conf_qhat = 0.0         // ANVIL_CONFORMAL_QHAT — global qhat for the default head
 var gate_minconf = 0.0
 
 func bearer_key(req) (k) {
@@ -1075,8 +1078,33 @@ func handle_route(req) (res) {
 	if route != "chat" { action = "tool_call" }
 	reason := "ok"
 	if py >= 0.5 { action = "delegate"  reason = "noul_escalate" }
-	if action != "delegate" && conf < minconf { action = "delegate"  reason = "low_confidence" }
+	// conformal qhat resolves per expert lane, else the default head's global.
+	set_size := -1
+	qhat := conf_qhat
+	if len(expert) > 0 && expert != "default" {
+		i := 0
+		while i < len(cq_names) {
+			if cq_names[i] == expert { qhat = cq_vals[i] }
+			i = i + 1
+		}
+	}
+	// On a conformal lane the calibrated set replaces the hand-tuned floor.
+	if action != "delegate" && qhat <= 0.0 && conf < minconf { action = "delegate"  reason = "low_confidence" }
 	if action != "delegate" && route == "escalate" { action = "delegate"  reason = "route_escalate" }
+	// conformal gate: prediction set = classes with p >= 1-qhat (qhat calibrated
+	// offline by tools/conformal_eval.py). A singleton set means "only one
+	// plausible route" — a sharper confidence signal than max-p alone. Any other
+	// set size abstains.
+	if qhat > 0.0 {
+		thr := 1.0 - qhat
+		set_size = 0
+		i := 0
+		while i < hd_nr {
+			if peek_f32(hd_probs, i*4) >= thr { set_size = set_size + 1 }
+			i = i + 1
+		}
+		if action != "delegate" && set_size != 1 { action = "delegate"  reason = "conformal_abstain" }
+	}
 
 	call_name := ""
 	call_args := "{}"
@@ -1176,6 +1204,7 @@ func handle_route(req) (res) {
 	lat := now_ms() - t0
 	body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"confidence\":" + str(conf) + ",\"p_yes\":" + str(py)
 	if len(ghead.names) > 0 { body = body + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_confidence\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\"" }
+	if set_size >= 0 { body = body + ",\"set_size\":" + str(set_size) + ",\"qhat\":" + str(qhat) }
 	if len(via) > 0 { body = body + ",\"via\":\"" + json_esc(via) + "\"" }
 	if len(tier) > 0 { body = body + ",\"tier\":\"" + json_esc(tier) + "\"" }
 	body = body + ",\"reason\":\"" + reason + "\""
@@ -1447,6 +1476,22 @@ func main() {
 		}
 		println("expert minconf overrides: " + str(len(emin_names)))
 	}
+	cq_env := env("ANVIL_EXPERT_QHAT")
+	if len(cq_env) > 0 {
+		ep := split(cq_env, ",")
+		i := 0
+		while i < len(ep) {
+			sep := index(ep[i], ":")
+			if sep > 0 {
+				cq_names = append(cq_names, trim(substr(ep[i], 0, sep)))
+				cq_vals = append(cq_vals, parse_float(trim(substr(ep[i], sep + 1, len(ep[i])))))
+			}
+			i = i + 1
+		}
+		println("expert conformal qhats: " + str(len(cq_names)))
+	}
+	conf_qhat = parse_float(env("ANVIL_CONFORMAL_QHAT"))
+	if conf_qhat > 0.0 { println("conformal qhat (default head): " + str(conf_qhat)) }
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
 	// max|mean overrides all heads to one tap (legacy/global mode); layer via
