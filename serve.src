@@ -529,6 +529,8 @@ var def_head = Head{}  // snapshot of ANVIL_HEAD for unmapped keys
 var ghead = Head{}
 var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
+var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
+var emin_vals = []float{}   //   confidence floor; overrides the global floor
 var gate_minconf = 0.0
 
 func bearer_key(req) (k) {
@@ -952,6 +954,16 @@ func handle_route(req) (res) {
 		i = 1
 		while i < hd_nr { if peek_f32(hd_probs, i*4) > peek_f32(hd_probs, best*4) { best = i }  i = i + 1 }
 	}
+	// per-expert confidence floor: a pinned/gated lane can carry its own
+	// abstention point (a municipal head's citizens phrase loosely — its floor
+	// is lower than the open-domain front door's). Request min_conf still wins.
+	if dr.min_conf <= 0.0 && len(expert) > 0 && expert != "default" {
+		i := 0
+		while i < len(emin_names) {
+			if emin_names[i] == expert { minconf = emin_vals[i] }
+			i = i + 1
+		}
+	}
 	py := 0.0
 	if nl_head.nr > 0 && pinned == 0 {
 		// noul/score are OOD checks for the open-domain front door. A pinned
@@ -1231,6 +1243,20 @@ func main() {
 			i = i + 1
 		}
 		println("experts: " + str(len(edomains)) + " pinned lane(s)")
+	}
+	emc_env := env("ANVIL_EXPERT_MINCONF")
+	if len(emc_env) > 0 {
+		ep := split(emc_env, ",")
+		i := 0
+		while i < len(ep) {
+			sep := index(ep[i], ":")
+			if sep > 0 {
+				emin_names = append(emin_names, trim(substr(ep[i], 0, sep)))
+				emin_vals = append(emin_vals, parse_float(trim(substr(ep[i], sep + 1, len(ep[i])))))
+			}
+			i = i + 1
+		}
+		println("expert minconf overrides: " + str(len(emin_names)))
 	}
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
