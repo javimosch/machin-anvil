@@ -149,10 +149,12 @@ func apply_feat(fi) {
 }
 
 // mhd3: concatenate the head's declared tap buffers into dst, in file order.
+// feats entry -1 = the last-token snapshot (kind 0 in the file).
 func build_feat(feats, dst) {
 	t := 0
 	while t < len(feats) {
-		src := pt_bufs[feats[t]]
+		src := s_xlast
+		if feats[t] >= 0 { src = pt_bufs[feats[t]] }
 		i := 0
 		while i < dim { poke_f32(dst, t*dim*4+i*4, peek_f32(src, i*4))  i = i + 1 }
 		t = t + 1
@@ -204,8 +206,10 @@ func read_head(path) (h) {
 		i := 0
 		while i < ntaps {
 			k := byte_at(b, 17 + i*2)  lay := byte_at(b, 18 + i*2) - 1
-			if k < 1 || k > 2 || lay < 0 { println("bad mhd3 tap spec in " + path)  exit(1) }
-			h.feats = append(h.feats, pt_register(k, lay))
+			if k == 0 { h.feats = append(h.feats, -1) } else {
+				if k > 2 || lay < 0 { println("bad mhd3 tap spec in " + path)  exit(1) }
+				h.feats = append(h.feats, pt_register(k, lay))
+			}
 			i = i + 1
 		}
 	} else {
@@ -307,70 +311,27 @@ func decide() (best) {
 	return
 }
 
-// ---- noul head (ANVIL_NOUL): a second mhd1 with a "yes" route -> p(yes) ----
-var nl_buf = 0
-var nl_nr = 0
-var nl_temp = 1.0
-var nl_w = 0
-var nl_b = 0
+// ---- noul head (ANVIL_NOUL): a second head with a "yes" route -> p(yes) ----
+var nl_head = Head{}
 var nl_yes = -1   // index of the "yes" route, found at load
-var nl_probs = 0
 
 func load_noul(path) {
-	b := read_file_bytes(path)
-	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
-	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) }
-	nl_nr = read_i32(b, 4)
-	nl_dimv := read_i32(b, 8)
-	nl_temp = f32_at(b, 12)
-	if nl_dimv != dim { println("noul head dim " + str(nl_dimv) + " != model dim " + str(dim))  exit(1) }
-	nl_buf = bytes_to_buf(b)
-	nl_w = 16
-	nl_b = nl_w + nl_nr * dim * 4
-	off := nl_b + nl_nr * 4
+	nl_head = read_head(path)
 	i := 0
-	while i < nl_nr {
-		n := byte_at(b, off)  off = off + 1
-		nm := bytes_str(bytes_sub(b, off, off + n))
-		if nm == "yes" { nl_yes = i }
-		off = off + n
+	while i < nl_head.nr {
+		if nl_head.names[i] == "yes" { nl_yes = i }
 		i = i + 1
 	}
-	nl_probs = alloc(nl_nr * 4)
-	println("noul head: " + str(nl_nr) + " routes, yes_idx=" + str(nl_yes) + ", T=" + str(nl_temp))
+	println("noul head: " + str(nl_head.nr) + " routes, yes_idx=" + str(nl_yes) + ", T=" + str(nl_head.temp))
 	return
 }
 
-// ---- score head (ANVIL_SCORE): third mhd1, ordinal labels ("1".."4") ----
-var sc_buf = 0
-var sc_nr = 0
-var sc_temp = 1.0
-var sc_w = 0
-var sc_b = 0
-var sc_names = []string{}
-var sc_probs = 0
+// ---- score head (ANVIL_SCORE): third head, ordinal labels ("1".."4") ----
+var sc_head = Head{}
 
 func load_score(path) {
-	b := read_file_bytes(path)
-	if len(b) < 16 { println("cannot read head: " + path)  exit(1) }
-	if read_i32(b, 0) != 828663917 { println("bad head magic in " + path)  exit(1) }
-	sc_nr = read_i32(b, 4)
-	sc_dimv := read_i32(b, 8)
-	sc_temp = f32_at(b, 12)
-	if sc_dimv != dim { println("score head dim " + str(sc_dimv) + " != model dim " + str(dim))  exit(1) }
-	sc_buf = bytes_to_buf(b)
-	sc_w = 16
-	sc_b = sc_w + sc_nr * dim * 4
-	off := sc_b + sc_nr * 4
-	i := 0
-	while i < sc_nr {
-		n := byte_at(b, off)  off = off + 1
-		sc_names = append(sc_names, bytes_str(bytes_sub(b, off, off + n)))
-		off = off + n
-		i = i + 1
-	}
-	sc_probs = alloc(sc_nr * 4)
-	println("score head: " + str(sc_nr) + " labels, T=" + str(sc_temp))
+	sc_head = read_head(path)
+	println("score head: " + str(sc_head.nr) + " labels, T=" + str(sc_head.temp))
 	return
 }
 

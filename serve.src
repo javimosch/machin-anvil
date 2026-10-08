@@ -649,6 +649,9 @@ func head_prefill(state, ctx) (ok) {
 		// ensure s_x holds the normalized hidden at the last prompt position
 		// (the batched prefill leaves it in pb_* buffers, not s_x)
 		forward(toks[np-1], np-1)
+		// mhd3 heads can mix pooled taps with a last-token tap (kind 0)
+		i = 0
+		while i < dim { poke_f32(s_xlast, i*4, peek_f32(s_x, i*4))  i = i + 1 }
 	}
 	i = 0
 	while i < np { poke_i32(cache_buf, i*4, toks[i])  i = i + 1 }
@@ -661,7 +664,7 @@ func head_prefill(state, ctx) (ok) {
 // head (a 2-route mhd1 with a "yes" label). The question is fixed at training
 // time; this primitive answers "should this escalate?" for the router.
 func handle_noul(req) (res) {
-	if nl_nr == 0 {
+	if nl_head.nr == 0 {
 		res = ok_json("{\"error\":{\"message\":\"no noul head loaded (set ANVIL_NOUL)\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
@@ -677,11 +680,10 @@ func handle_noul(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	apply_feat(-1)
-	score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
+	head_best(nl_head)
 	mu_rel <- 1
 	py := 0.0
-	if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+	if nl_yes >= 0 { py = peek_f32(nl_head.probs, nl_yes*4) }
 	ans := "no"
 	if py >= 0.5 { ans = "yes" }
 	body := "{\"object\":\"noul\",\"model\":\"" + model_id + "\",\"answer\":\"" + ans + "\",\"probability\":" + str(py) + "}"
@@ -694,7 +696,7 @@ func handle_noul(req) (res) {
 // over the head's ordinal labels + the argmax as "grade". The rubric is fixed
 // at training time — currently request complexity 1..4.
 func handle_score(req) (res) {
-	if sc_nr == 0 {
+	if sc_head.nr == 0 {
 		res = ok_json("{\"error\":{\"message\":\"no score head loaded (set ANVIL_SCORE)\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
@@ -710,18 +712,18 @@ func handle_score(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	best := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
+	best := head_best(sc_head)
 	mu_rel <- 1
 	probs := ""
 	i := 0
-	while i < sc_nr {
+	while i < sc_head.nr {
 		if i > 0 { probs = probs + "," }
-		probs = probs + "\"" + json_esc(sc_names[i]) + "\":" + str(peek_f32(sc_probs, i*4))
+		probs = probs + "\"" + json_esc(sc_head.names[i]) + "\":" + str(peek_f32(sc_head.probs, i*4))
 		i = i + 1
 	}
-	body := "{\"object\":\"score\",\"model\":\"" + model_id + "\",\"grade\":\"" + json_esc(sc_names[best]) + "\",\"confidence\":" + str(peek_f32(sc_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
+	body := "{\"object\":\"score\",\"model\":\"" + model_id + "\",\"grade\":\"" + json_esc(sc_head.names[best]) + "\",\"confidence\":" + str(peek_f32(sc_head.probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
 	res = ok_json(body)
-	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"score\",\"state\":\"" + json_esc(dr.state) + "\",\"grade\":\"" + json_esc(sc_names[best]) + "\",\"conf\":" + str(peek_f32(sc_probs, best*4)) + "}")
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"score\",\"state\":\"" + json_esc(dr.state) + "\",\"grade\":\"" + json_esc(sc_head.names[best]) + "\",\"conf\":" + str(peek_f32(sc_head.probs, best*4)) + "}")
 	return
 }
 
@@ -934,20 +936,18 @@ func handle_route(req) (res) {
 		while i < hd_nr { if peek_f32(hd_probs, i*4) > peek_f32(hd_probs, best*4) { best = i }  i = i + 1 }
 	}
 	py := 0.0
-	if nl_nr > 0 && pinned == 0 {
+	if nl_head.nr > 0 && pinned == 0 {
 		// noul/score are OOD checks for the open-domain front door. A pinned
 		// request already declared its domain — the expert's own `escalate`
 		// class is the abstention path, and noul (trained on general
 		// traffic) would veto legitimate in-domain phrasing.
-		apply_feat(-1)
-		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
-		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+		head_best(nl_head)
+		if nl_yes >= 0 { py = peek_f32(nl_head.probs, nl_yes*4) }
 	}
 	tier := ""
-	if sc_nr > 0 && pinned == 0 {
-		apply_feat(-1)
-		sb := score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs)
-		tier = sc_names[sb]
+	if sc_head.nr > 0 && pinned == 0 {
+		sb := head_best(sc_head)
+		tier = sc_head.names[sb]
 	}
 	conf := peek_f32(hd_probs, best*4)
 	route := hd_names[best]
@@ -1090,22 +1090,21 @@ func handle_assess(req) (res) {
 	apply_tenant_head(req)
 	best := decide()
 	py := 0.0
-	if nl_nr > 0 {
-		apply_feat(-1)
-		score_head(nl_buf, nl_nr, nl_w, nl_b, nl_temp, nl_probs)
-		if nl_yes >= 0 { py = peek_f32(nl_probs, nl_yes*4) }
+	if nl_head.nr > 0 {
+		head_best(nl_head)
+		if nl_yes >= 0 { py = peek_f32(nl_head.probs, nl_yes*4) }
 	}
 	sbest := -1
-	if sc_nr > 0 { apply_feat(-1)  sbest = score_head(sc_buf, sc_nr, sc_w, sc_b, sc_temp, sc_probs) }
+	if sc_head.nr > 0 { sbest = head_best(sc_head) }
 	mu_rel <- 1
 	body := "{\"object\":\"assess\",\"model\":\"" + model_id + "\",\"decision\":{\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + "}"
-	if nl_nr > 0 {
+	if nl_head.nr > 0 {
 		ans := "no"
 		if py >= 0.5 { ans = "yes" }
 		body = body + ",\"noul\":{\"answer\":\"" + ans + "\",\"probability\":" + str(py) + "}"
 	}
-	if sc_nr > 0 {
-		body = body + ",\"score\":{\"grade\":\"" + json_esc(sc_names[sbest]) + "\",\"confidence\":" + str(peek_f32(sc_probs, sbest*4)) + "}"
+	if sc_head.nr > 0 {
+		body = body + ",\"score\":{\"grade\":\"" + json_esc(sc_head.names[sbest]) + "\",\"confidence\":" + str(peek_f32(sc_head.probs, sbest*4)) + "}"
 	}
 	body = body + "}"
 	res = ok_json(body)
