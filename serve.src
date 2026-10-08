@@ -444,7 +444,7 @@ func handle_shutdown(req) (res) {
 			return
 		}
 	}
-	res = ok_json("{\"ok\":true,\"shutting_down\":true}")
+	res = ok_json("{\"ok\":true,\"stopping\":true,\"shutting_down\":true}")
 	go delayed_exit()
 	return
 }
@@ -601,7 +601,12 @@ var delegate_sys = ""
 var api_keys = []string{}
 var tkeys = []string{}
 var thead = []Head{}   // parallel to tkeys: tenant heads preloaded at startup
-var def_head = Head{}  // snapshot of ANVIL_HEAD for unmapped keys
+var def_head = zero_head()
+
+func zero_head() (h) {
+	h = Head{}
+	return
+}
 
 // MoE gate: ANVIL_GATE=<gate.head> turns /v1/route into a two-stage
 // dispatcher. The gate head scores the DOMAIN on the same prefill hidden
@@ -610,7 +615,7 @@ var def_head = Head{}  // snapshot of ANVIL_HEAD for unmapped keys
 // ANVIL_GATE_MINCONF (or the request's min_gate_conf) delegates with reason
 // low_gate_confidence; a domain with no expert mapping falls back to the
 // ANVIL_HEAD default.
-var ghead = Head{}
+var ghead = zero_head()
 var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
 var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
@@ -1239,7 +1244,11 @@ func api_route(req) (res) {
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
-	if req.method == "GET" && req.path == "/_health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
+	if req.method == "GET" && req.path == "/_health" {
+		hc, hout, herr := exec("echo $PPID")
+		res = ok_json("{\"ok\":true,\"service\":\"anvil-serve\",\"model\":\"" + model_id + "\",\"pid\":" + trim(hout) + "}")
+		return
+	}
 	if req.method == "GET" && req.path == "/guide" { res = handle_guide()  return }
 	if req.method == "GET" && req.path == "/llms.txt" { res = handle_llms()  return }
 	if req.method == "GET" && req.path == "/v1/whoami" { res = handle_whoami(req)  return }
