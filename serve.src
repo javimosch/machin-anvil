@@ -400,6 +400,8 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/assess\",\"doc\":\"decide+noul+score in one call\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"doc\":\"generative path, OpenAI-compatible, SSE stream\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/models\",\"doc\":\"model id\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/v1/whoami\",\"doc\":\"masked key identity + tenant head + expert lanes\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/_shutdown\",\"doc\":\"token-gated (or loopback-only without keys) shutdown\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/health\",\"doc\":\"liveness (alias /_health)\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
@@ -419,6 +421,52 @@ func handle_llms() (res) {
 	t = t + "GET /guide for the full JSON manual, /health for liveness. Expert pin: body.expert=<domain>.\n"
 	t = t + "Delegation is a feature: low conf, escalate route, noul veto, or head/trunk disagreement all return action=delegate — route to a bigger model or human, never guess.\n"
 	res = ok_text(t)
+	return
+}
+
+func delayed_exit() { sleep(200)  exit(0) }
+
+// POST /_shutdown — cli-daemon-spec: shutdown is token-gated whenever the
+// bind isn't loopback. We always bind 0.0.0.0 (appliance), so: when
+// ANVIL_KEYS is set a valid bearer is required; with no keys, loopback
+// peers only. The exit is deferred so this response reaches the caller.
+func handle_shutdown(req) (res) {
+	if len(api_keys) > 0 {
+		if auth_ok(req) == 0 {
+			res = ok_json("{\"error\":{\"message\":\"invalid api key\",\"type\":\"invalid_request_error\"}}")
+			res.status = "401 Unauthorized"
+			return
+		}
+	} else {
+		if req.remote != "127.0.0.1" && req.remote != "::1" {
+			res = ok_json("{\"error\":{\"message\":\"shutdown is loopback-only without ANVIL_KEYS\",\"type\":\"forbidden\"}}")
+			res.status = "403 Forbidden"
+			return
+		}
+	}
+	res = ok_json("{\"ok\":true,\"shutting_down\":true}")
+	go delayed_exit()
+	return
+}
+
+// GET /v1/whoami — cli-trial-spec: a bearer tells the agent which identity
+// and head it lands on, without exposing the key itself.
+func handle_whoami(req) (res) {
+	k := bearer_key(req)
+	mask := "none"
+	if len(k) > 8 { mask = substr(k, 0, 6) + "…" + substr(k, len(k) - 4, len(k)) } else if len(k) > 0 { mask = "***" }
+	tn := "default"
+	i := 0
+	while i < len(tkeys) { if tkeys[i] == k { tn = "tenant:" + str(i) }  i = i + 1 }
+	exp := "["
+	i = 0
+	while i < len(edomains) {
+		if i > 0 { exp = exp + "," }
+		exp = exp + "\"" + json_esc(edomains[i]) + "\""
+		i = i + 1
+	}
+	exp = exp + "]"
+	res = ok_json("{\"model\":\"" + model_id + "\",\"key\":\"" + mask + "\",\"head\":\"" + tn + "\",\"experts\":" + exp + "}")
 	return
 }
 
@@ -1194,6 +1242,8 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/_health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	if req.method == "GET" && req.path == "/guide" { res = handle_guide()  return }
 	if req.method == "GET" && req.path == "/llms.txt" { res = handle_llms()  return }
+	if req.method == "GET" && req.path == "/v1/whoami" { res = handle_whoami(req)  return }
+	if req.method == "POST" && req.path == "/_shutdown" { res = handle_shutdown(req)  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
 	return
