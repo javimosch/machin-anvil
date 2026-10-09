@@ -404,6 +404,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/feedback\",\"doc\":\"open submit {message,kind?,context?,reporter?,id?} — idempotent on id, 16KB cap, 30/min/ip\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/feedback\",\"doc\":\"admin-gated read (valid ANVIL_KEYS bearer), ?limit=n\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/_shutdown\",\"doc\":\"token-gated (or loopback-only without keys) shutdown\"},"
+	g = g + "{\"method\":\"GET|POST\",\"path\":\"/_qhat\",\"doc\":\"live conformal recalibration — read or set per-lane qhat (ACI/flywheel hook), same gating as /_shutdown\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/health\",\"doc\":\"liveness (alias /_health)\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
@@ -448,6 +449,64 @@ func handle_shutdown(req) (res) {
 	}
 	res = ok_json("{\"ok\":true,\"stopping\":true,\"shutting_down\":true}")
 	go delayed_exit()
+	return
+}
+
+// GET/POST /_qhat — live conformal recalibration. Same gating as /_shutdown.
+// POST {"expert":"mairie_c","qhat":0.62} sets a lane's qhat (append or update);
+// {"expert":"default",...} sets the global one. This is the hook an external
+// ACI loop (flywheel: score feedback labels -> adjust qhat) pushes through —
+// the guarantee survives drift because the threshold can move at runtime.
+func handle_qhat(req) (res) {
+	if len(api_keys) > 0 {
+		if auth_ok(req) == 0 {
+			res = ok_json("{\"error\":{\"message\":\"invalid api key\",\"type\":\"invalid_request_error\"}}")
+			res.status = "401 Unauthorized"
+			return
+		}
+	} else {
+		if req.remote != "127.0.0.1" && req.remote != "::1" {
+			res = ok_json("{\"error\":{\"message\":\"qhat admin is loopback-only without ANVIL_KEYS\",\"type\":\"forbidden\"}}")
+			res.status = "403 Forbidden"
+			return
+		}
+	}
+	if req.method == "GET" {
+		b := "{\"ok\":true,\"default\":" + str(conf_qhat) + ",\"experts\":{"
+		i := 0
+		while i < len(cq_names) {
+			if i > 0 { b = b + "," }
+			b = b + "\"" + json_esc(cq_names[i]) + "\":" + str(cq_vals[i])
+			i = i + 1
+		}
+		res = ok_json(b + "}}")
+		return
+	}
+	raw, _ := json_get(req.body, ".expert")
+	ex := unq(raw)
+	qraw, qerr := json_get(req.body, ".qhat")
+	q := parse_float(unq(qraw))
+	if len(qerr) > 0 || q <= 0.0 || q >= 1.0 {
+		res = ok_json("{\"ok\":false,\"error\":\"qhat required, 0<qhat<1\"}")
+		res.status = "400 Bad Request"
+		return
+	}
+	if len(ex) == 0 || ex == "default" {
+		conf_qhat = q
+		res = ok_json("{\"ok\":true,\"expert\":\"default\",\"qhat\":" + str(q) + "}")
+		return
+	}
+	i := 0
+	while i < len(cq_names) {
+		if cq_names[i] == ex {
+			cq_vals[i] = q
+			res = ok_json("{\"ok\":true,\"expert\":\"" + json_esc(ex) + "\",\"qhat\":" + str(q) + "}")
+			return
+		}
+		i = i + 1
+	}
+	cq_names = append(cq_names, ex)  cq_vals = append(cq_vals, q)
+	res = ok_json("{\"ok\":true,\"expert\":\"" + json_esc(ex) + "\",\"qhat\":" + str(q) + "}")
 	return
 }
 
@@ -1371,6 +1430,7 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/llms.txt" { res = handle_llms()  return }
 	if req.method == "GET" && req.path == "/v1/whoami" { res = handle_whoami(req)  return }
 	if req.method == "POST" && req.path == "/_shutdown" { res = handle_shutdown(req)  return }
+	if req.path == "/_qhat" { res = handle_qhat(req)  return }
 	res = ok_json("{\"error\":{\"message\":\"not found\",\"type\":\"invalid_request_error\"}}")
 	res.status = "404 Not Found"
 	return
