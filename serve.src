@@ -398,6 +398,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/noul\",\"doc\":\"escalation yes/no head\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/score\",\"doc\":\"complexity tier 1-4\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/assess\",\"doc\":\"decide+noul+score in one call\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/systemone\",\"doc\":\"Jev-compatible typed questions: {state, model, questions:{qid:{type:noul|choice|score, instructions, criteria}}} -> {answers:{...}} — teacher-forced mean-logprob candidate scoring, no generation, no head files needed\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/chat/completions\",\"doc\":\"generative path, OpenAI-compatible, SSE stream\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/models\",\"doc\":\"model id\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/whoami\",\"doc\":\"masked key identity + tenant head + expert lanes\"},"
@@ -409,7 +410,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
-	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_EXPERT_QHAT=dom:0.648,... / ANVIL_CONFORMAL_QHAT (conformal gate, replaces minconf floor on the lane)\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
+	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_EXPERT_QHAT=dom:0.648,... / ANVIL_CONFORMAL_QHAT (conformal gate, replaces minconf floor on the lane)\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"ANVIL_S1_T[_CHOICE|_NOUL|_SCORE] (systemone candidate softmax temps, default 1.0)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
 	g = g + "\"gotchas\":[\"expert pin skips gate AND noul/score — the expert's own 'escalate' class is its abstention path\",\"pooled heads reject prompts >context with 400\",\"kind-0 'last' taps are the final-layer snapshot only\",\"per-request min_conf beats every env floor\"],"
 	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|conformal_abstain|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
 	res = ok_json(g)
@@ -684,6 +685,9 @@ var emin_vals = []float{}   //   confidence floor; overrides the global floor
 var cq_names = []string{}   // ANVIL_EXPERT_QHAT="mairie_c:0.648,..." — per-lane
 var cq_vals = []float{}     //   conformal qhat (set = {p >= 1-qhat}); 0=off
 var conf_qhat = 0.0         // ANVIL_CONFORMAL_QHAT — global qhat for the default head
+var s1_t_choice = 1.0       // ANVIL_S1_T_* — /v1/systemone candidate softmax temps
+var s1_t_noul = 1.0
+var s1_t_score = 1.0
 var gate_minconf = 0.0
 
 func bearer_key(req) (k) {
@@ -1405,6 +1409,357 @@ func handle_feedback(req) (res) {
 	return
 }
 
+// ---- POST /v1/systemone: Jev-compatible typed-question endpoint ----
+// Contract (docs.typesafe.ai / github.com/us/jev-local):
+//   {state, model, questions:{qid:{type:noul|choice|score, instructions, criteria}}}
+//   -> {model, answers:{qid:{type, ...}}, usage:{input_tokens, output_tokens}}
+// Scoring method (matches jev-local's HfLogprobScorer): one shared prompt
+// prefix per question; each candidate is scored by teacher-forced mean
+// logprob over the candidate's tokens only; softmax at per-head temperature.
+// No generation. Candidate KV positions [np, ...) are overwritten per
+// candidate; the prefix KV [0, np) stays valid — before scoring each
+// candidate the last prefix token is re-forwarded to restore prefix logits.
+
+// log p(tok) from the logits left in s_logits by the last forward
+func s1_logp(tok) (lp) {
+	mx := peek_f32(s_logits, 0)
+	i := 1
+	while i < vocab_size {
+		v := peek_f32(s_logits, i*4)
+		if v > mx { mx = v }
+		i = i + 1
+	}
+	s := 0.0
+	i = 0
+	while i < vocab_size { s = s + exp(peek_f32(s_logits, i*4) - mx)  i = i + 1 }
+	lp = peek_f32(s_logits, tok*4) - mx - log(s)
+	return
+}
+
+// end index of the JSON value starting at i in s (string/number/object/array/bool)
+func s1_span(s, i) (e) {
+	e = i
+	n := len(s)
+	depth := 0
+	instr := 0
+	while e < n {
+		ch := charat(s, e)
+		if instr == 1 {
+			if ch == "\\" { e = e + 1 } else { if ch == "\"" { instr = 0 } }
+			e = e + 1
+			continue
+		}
+		if ch == "\"" { instr = 1  e = e + 1  continue }
+		if ch == "{" || ch == "[" { depth = depth + 1  e = e + 1  continue }
+		if ch == "}" || ch == "]" {
+			if depth == 0 { return }
+			depth = depth - 1
+			e = e + 1
+			continue
+		}
+		if ch == "," && depth == 0 { return }
+		e = e + 1
+	}
+	return
+}
+
+// top-level fields of a JSON object -> parallel key / raw-value slices
+func s1_fields(obj) (keys, vals) {
+	keys = []string{}
+	vals = []string{}
+	i := index(obj, "{")
+	if i < 0 { return }
+	i = i + 1
+	n := len(obj)
+	while i < n {
+		c := charat(obj, i)
+		if c == "}" { break }
+		if c != "\"" { i = i + 1  continue }
+		ks := i + 1
+		j := ks
+		while j < n {
+			if charat(obj, j) == "\\" { j = j + 2  continue }
+			if charat(obj, j) == "\"" { break }
+			j = j + 1
+		}
+		keys = append(keys, substr(obj, ks, j))
+		i = j + 1
+		while i < n && charat(obj, i) != ":" { i = i + 1 }
+		i = i + 1
+		while i < n && (charat(obj, i) == " " || charat(obj, i) == "\n" || charat(obj, i) == "\t" || charat(obj, i) == "\r") { i = i + 1 }
+		e := s1_span(obj, i)
+		vals = append(vals, substr(obj, i, e))
+		i = e
+	}
+	return
+}
+
+// elements of a JSON array -> raw-value slices (strings stay quoted)
+func s1_elems(arr) (vals) {
+	vals = []string{}
+	i := index(arr, "[")
+	if i < 0 { return }
+	i = i + 1
+	n := len(arr)
+	while i < n {
+		c := charat(arr, i)
+		if c == "]" { break }
+		if c == "," || c == " " || c == "\n" || c == "\t" || c == "\r" { i = i + 1  continue }
+		e := s1_span(arr, i)
+		vals = append(vals, substr(arr, i, e))
+		i = e
+	}
+	return
+}
+
+// jev-local render_prefix: State/Question[/k means: v]/Answer with exactly
+// one of: a | b[/Yes means:../No means:.. or Levels: 0 = l0, ...]/Answer:
+func s1_prefix(state, instr, optkeys, optvals, levels, ntrue, nfalse) (p) {
+	p = "State: " + state + "\nQuestion: " + instr + "\n"
+	i := 0
+	while i < len(optvals) {
+		if len(optvals[i]) > 0 { p = p + optkeys[i] + " means: " + optvals[i] + "\n" }
+		i = i + 1
+	}
+	if len(optkeys) > 0 {
+		p = p + "Answer with exactly one of: "
+		i = 0
+		while i < len(optkeys) {
+			if i > 0 { p = p + " | " }
+			p = p + optkeys[i]
+			i = i + 1
+		}
+		p = p + "\n"
+	}
+	if len(ntrue) > 0 && len(nfalse) > 0 {
+		p = p + "Yes means: " + ntrue + "\nNo means: " + nfalse + "\n"
+	} else {
+		if len(levels) > 0 {
+			p = p + "Levels: "
+			i = 0
+			while i < len(levels) {
+				if i > 0 { p = p + ", " }
+				p = p + str(i) + " = " + levels[i]
+				i = i + 1
+			}
+			p = p + "\n"
+		}
+	}
+	p = p + "Answer:"
+	return
+}
+
+// mean logprob of candidate tokens ctoks occupying positions [np, np+len);
+// s_logits must hold the next-token distribution for position np on entry
+func s1_cand_mean(np, ctoks) (m) {
+	m = 0.0
+	if len(ctoks) == 0 { return }
+	sum := s1_logp(ctoks[0])
+	i := 1
+	while i < len(ctoks) {
+		forward(ctoks[i-1], np+i-1)
+		sum = sum + s1_logp(ctoks[i])
+		i = i + 1
+	}
+	m = sum / float(len(ctoks))
+	return
+}
+
+// candidate token list for `cand` continuing prefix tokens ptoks: encode
+// prefix+" "+cand, drop the longest common leading run (tokenization is not
+// prefix-preserving at the join — jev-local does the same)
+func s1_cand_toks(prefix, ptoks, cand) (ctoks) {
+	ctoks = []int{}
+	full := bpe_encode_raw(prefix + " " + cand)
+	k := 0
+	n := len(ptoks)
+	if len(full) < n { n = len(full) }
+	while k < n && ptoks[k] == full[k] { k = k + 1 }
+	i := k
+	while i < len(full) { ctoks = append(ctoks, full[i])  i = i + 1 }
+	return
+}
+
+func s1_softmax(means, temp) (probs) {
+	probs = []float{}
+	if len(means) == 0 { return }
+	mx := means[0]
+	i := 1
+	while i < len(means) { if means[i] > mx { mx = means[i] }  i = i + 1 }
+	sum := 0.0
+	i = 0
+	while i < len(means) {
+		e := exp((means[i] - mx) / temp)
+		probs = append(probs, e)
+		sum = sum + e
+		i = i + 1
+	}
+	i = 0
+	while i < len(probs) { probs[i] = probs[i] / sum  i = i + 1 }
+	return
+}
+
+// score one question against the prefill'd prefix; returns the answer JSON
+// ("" + err on failure). Caller holds the model lock.
+func s1_answer(qid, qv, state) (aj, err, ntoks) {
+	aj = ""
+	err = ""
+	ntoks = 0
+	qtype, _ := json_get(qv, ".type")
+	qtype = unq(qtype)
+	instr, _ := json_get(qv, ".instructions")
+	instr = unq(instr)
+	crit, _ := json_get(qv, ".criteria")
+	optkeys := []string{}
+	optvals := []string{}
+	levels := []string{}
+	cands := []string{}
+	ntrue := ""
+	nfalse := ""
+	if qtype == "noul" {
+		if len(crit) > 0 {
+			ck, cv := s1_fields(crit)
+			i := 0
+			while i < len(ck) {
+				if ck[i] != "true" && ck[i] != "false" { err = qid + ": noul criteria keys must be true/false"  return }
+				i = i + 1
+			}
+			t, _ := json_get(crit, ".true")
+			f, _ := json_get(crit, ".false")
+			ntrue = unq(t)
+			nfalse = unq(f)
+		}
+		optkeys = append(optkeys, "Yes")
+		optkeys = append(optkeys, "No")
+		cands = optkeys
+	}
+	if qtype == "choice" {
+		ck, cv := s1_fields(crit)
+		if len(ck) == 0 { err = qid + ": choice criteria must not be empty"  return }
+		if len(ck) > 255 { err = qid + ": choice accepts up to 255 options"  return }
+		optkeys = ck
+		i := 0
+		while i < len(cv) { optvals = append(optvals, unq(cv[i]))  i = i + 1 }
+		cands = ck
+	}
+	if qtype == "score" {
+		levels = []string{}
+		lv := s1_elems(crit)
+		i := 0
+		while i < len(lv) { levels = append(levels, unq(lv[i]))  i = i + 1 }
+		if len(levels) < 2 || len(levels) > 10 { err = qid + ": score needs 2..10 levels"  return }
+		i = 0
+		while i < len(levels) { cands = append(cands, str(i))  i = i + 1 }
+	}
+	if qtype != "noul" && qtype != "choice" && qtype != "score" {
+		err = qid + ": unknown question type " + qtype
+		return
+	}
+	prefix := s1_prefix(state, instr, optkeys, optvals, levels, ntrue, nfalse)
+	ptoks := bpe_encode_raw(prefix)
+	np := len(ptoks)
+	if np + 32 >= seq_len { err = qid + ": state too long"  return }
+	ntoks = np
+	start := cache_common(ptoks)
+	if start >= np { start = np - 1 }
+	i := start
+	while i < np { forward(ptoks[i], i)  i = i + 1 }
+	// advertise only the prefix: candidate KV positions [np, ...) are scratch
+	i = 0
+	while i < np { poke_i32(cache_buf, i*4, ptoks[i])  i = i + 1 }
+	cache_len = np
+	means := []float{}
+	ci := 0
+	while ci < len(cands) {
+		ctoks := s1_cand_toks(prefix, ptoks, cands[ci])
+		if len(ctoks) == 0 { err = qid + ": candidate scores zero tokens"  return }
+		if np + len(ctoks) >= seq_len { err = qid + ": candidate too long"  return }
+		forward(ptoks[np-1], np-1)
+		means = append(means, s1_cand_mean(np, ctoks))
+		ntoks = ntoks + len(ctoks)
+		ci = ci + 1
+	}
+	temp := s1_t_choice
+	if qtype == "noul" { temp = s1_t_noul }
+	if qtype == "score" { temp = s1_t_score }
+	probs := s1_softmax(means, temp)
+	bi := 0
+	i = 1
+	while i < len(probs) { if probs[i] > probs[bi] { bi = i }  i = i + 1 }
+	if qtype == "noul" {
+		aj = "{\"type\":\"noul\",\"noul\":" + str(probs[0]) + "}"
+		return
+	}
+	if qtype == "choice" {
+		pj := ""
+		i = 0
+		while i < len(cands) {
+			if i > 0 { pj = pj + "," }
+			pj = pj + "\"" + json_esc(cands[i]) + "\":" + str(probs[i])
+			i = i + 1
+		}
+		aj = "{\"type\":\"choice\",\"choice\":\"" + json_esc(cands[bi]) + "\",\"probabilities\":{" + pj + "},\"confidence\":" + str(probs[bi]) + "}"
+		return
+	}
+	pj := ""
+	lj := ""
+	ev := 0.0
+	i = 0
+	while i < len(levels) {
+		if i > 0 { pj = pj + ","  lj = lj + "," }
+		pj = pj + "\"" + str(i) + "\":" + str(probs[i])
+		lj = lj + "\"" + str(i) + "\":\"" + json_esc(levels[i]) + "\""
+		ev = ev + float(i) * probs[i]
+		i = i + 1
+	}
+	aj = "{\"type\":\"score\",\"score\":" + str(ev) + ",\"legend\":{" + lj + "},\"probabilities\":{" + pj + "},\"confidence\":" + str(probs[bi]) + "}"
+	return
+}
+
+func handle_systemone(req) (res) {
+	st, _ := json_get(req.body, ".state")
+	st = unq(st)
+	if len(st) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	qraw, _ := json_get(req.body, ".questions")
+	qkeys, qvals := s1_fields(qraw)
+	if len(qkeys) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"questions required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	lk := <-mu_acq
+	lk = lk
+	t0 := now_ms()
+	aj := ""
+	errmsg := ""
+	toks := 0
+	i := 0
+	while i < len(qkeys) {
+		a, e, n := s1_answer(qkeys[i], qvals[i], st)
+		if len(e) > 0 { errmsg = e  break }
+		if len(aj) > 0 { aj = aj + "," }
+		aj = aj + "\"" + json_esc(qkeys[i]) + "\":" + a
+		toks = toks + n
+		i = i + 1
+	}
+	mu_rel <- 1
+	if len(errmsg) > 0 {
+		res = ok_json("{\"error\":{\"message\":\"" + json_esc(errmsg) + "\",\"type\":\"invalid_request_error\"}}")
+		res.status = "422 Unprocessable Entity"
+		return
+	}
+	body := "{\"model\":\"" + model_id + "\",\"answers\":{" + aj + "},\"usage\":{\"input_tokens\":" + str(toks) + ",\"output_tokens\":" + str(len(qkeys)) + "}}"
+	res = ok_json(body)
+	stl := len(st)
+	if stl > 120 { stl = 120 }
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"systemone\",\"state\":\"" + json_esc(substr(st, 0, stl)) + "\",\"n_q\":" + str(len(qkeys)) + ",\"ms\":" + str(now_ms()-t0) + "}")
+	return
+}
+
 func api_route(req) (res) {
 	if req.method == "POST" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
 	if req.method == "GET" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
@@ -1420,6 +1775,7 @@ func api_route(req) (res) {
 	if req.method == "POST" && req.path == "/v1/assess" { res = handle_assess(req)  return }
 	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
 	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
+	if req.method == "POST" && req.path == "/v1/systemone" { res = handle_systemone(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	if req.method == "GET" && req.path == "/_health" {
 		hc, hout, herr := exec("echo $PPID")
@@ -1551,6 +1907,14 @@ func main() {
 		println("expert conformal qhats: " + str(len(cq_names)))
 	}
 	conf_qhat = parse_float(env("ANVIL_CONFORMAL_QHAT"))
+	st := parse_float(env("ANVIL_S1_T"))
+	if st > 0.0 { s1_t_choice = st  s1_t_noul = st  s1_t_score = st }
+	stc := parse_float(env("ANVIL_S1_T_CHOICE"))
+	if stc > 0.0 { s1_t_choice = stc }
+	stn := parse_float(env("ANVIL_S1_T_NOUL"))
+	if stn > 0.0 { s1_t_noul = stn }
+	sts := parse_float(env("ANVIL_S1_T_SCORE"))
+	if sts > 0.0 { s1_t_score = sts }
 	if conf_qhat > 0.0 { println("conformal qhat (default head): " + str(conf_qhat)) }
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
