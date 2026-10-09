@@ -691,6 +691,8 @@ var s1_t_score = 1.0
 var s1_chat = 0             // ANVIL_S1_CHAT=1 — wrap prefix as a user turn (helps chat-tuned trunks)
 var s1_cand_desc = 0        // ANVIL_S1_CAND=desc — score criteria descriptions instead of bare keys
 var s1_first_tok = 0        // ANVIL_S1_FIRSTTOK=1 — first-token logprob only (mean dilutes short labels)
+var s1_head = Head{}        // ANVIL_S1_HEAD — trained entailment head scores candidates (USLP-style)
+var s1_yes = -1
 var gate_minconf = 0.0
 
 func bearer_key(req) (k) {
@@ -748,6 +750,16 @@ func log_decision(line) {
 // hidden in s_x. Returns 1 ok / 0 too-long. On ok the caller HOLDS the model
 // lock — score the head, then mu_rel <- 1.
 func head_prefill(state, ctx) (ok) {
+	lk := <-mu_acq
+	lk = lk
+	ok = head_prefill_locked(state, ctx)
+	if ok == 0 { mu_rel <- 1 }
+	return
+}
+
+// head_prefill without lock acquisition — for callers already holding
+// mu_acq (e.g. /v1/systemone's per-candidate scoring loop).
+func head_prefill_locked(state, ctx) (ok) {
 	ok = 0
 	msgs := []ChatMsg{}
 	m1 := ChatMsg{}  m1.role = "system"  m1.content = decide_sys
@@ -765,8 +777,6 @@ func head_prefill(state, ctx) (ok) {
 	msgs = append(msgs, m2)
 	toks := chat_tokens(msgs)
 	if len(toks) >= seq_len { return }
-	lk := <-mu_acq
-	lk = lk
 	np := len(toks)
 	if len(pt_kinds) > 0 {
 		// pooled heads read a max/mean over the last user turn's token span —
@@ -1678,39 +1688,72 @@ func s1_answer(qid, qv, state) (aj, err, ntoks) {
 		err = qid + ": unknown question type " + qtype
 		return
 	}
-	prefix := s1_prefix(state, instr, optkeys, optvals, levels, ntrue, nfalse)
-	ptoks := bpe_encode_raw(prefix)
-	if s1_chat == 1 {
-		cm := ChatMsg{}  cm.role = "user"  cm.content = prefix
-		cms := []ChatMsg{}  cms = append(cms, cm)
-		ptoks = chat_tokens(cms)
+	probs := []float{}
+	if s1_yes >= 0 {
+		// trained entailment scorer: one prefill per candidate on the same
+		// "State/Question/Option/Correct?" prompt shape the head was fit on
+		probs = []float{}
+		if qtype == "noul" {
+			// one shot: does the instruction itself hold? criteria true-desc wins
+			ot := "the answer is yes"
+			if len(ntrue) > 0 { ot = ntrue }
+			content := "State: " + state + "\nQuestion: " + instr + "\nOption: " + ot + "\nCorrect?"
+			if head_prefill_locked(content, []string{}) == 0 { err = qid + ": state too long"  return }
+			head_best(s1_head)
+			probs = append(probs, peek_f32(s1_head.probs, s1_yes*4))
+			probs = append(probs, 1.0 - probs[0])
+		} else {
+			ci := 0
+			while ci < len(cands) {
+				ot := cands[ci]
+				if qtype == "choice" && ci < len(optvals) && len(optvals[ci]) > 0 { ot = optvals[ci] }
+				if qtype == "score" && ci < len(levels) { ot = levels[ci] }
+				content := "State: " + state + "\nQuestion: " + instr + "\nOption: " + ot + "\nCorrect?"
+				if head_prefill_locked(content, []string{}) == 0 { err = qid + ": state too long"  return }
+				head_best(s1_head)
+				probs = append(probs, peek_f32(s1_head.probs, s1_yes*4))
+				ci = ci + 1
+			}
+			sum := 0.0
+			ci = 0
+			while ci < len(probs) { sum = sum + probs[ci]  ci = ci + 1 }
+			if sum > 0.0 { ci = 0  while ci < len(probs) { probs[ci] = probs[ci] / sum  ci = ci + 1 } }
+		}
+	} else {
+		prefix := s1_prefix(state, instr, optkeys, optvals, levels, ntrue, nfalse)
+		ptoks := bpe_encode_raw(prefix)
+		if s1_chat == 1 {
+			cm := ChatMsg{}  cm.role = "user"  cm.content = prefix
+			cms := []ChatMsg{}  cms = append(cms, cm)
+			ptoks = chat_tokens(cms)
+		}
+		np := len(ptoks)
+		if np + 32 >= seq_len { err = qid + ": state too long"  return }
+		ntoks = np
+		start := cache_common(ptoks)
+		if start >= np { start = np - 1 }
+		i := start
+		while i < np { forward(ptoks[i], i)  i = i + 1 }
+		// advertise only the prefix: candidate KV positions [np, ...) are scratch
+		i = 0
+		while i < np { poke_i32(cache_buf, i*4, ptoks[i])  i = i + 1 }
+		cache_len = np
+		means := []float{}
+		ci := 0
+		while ci < len(cands) {
+			ctoks := s1_cand_toks(prefix, ptoks, cands[ci])
+			if len(ctoks) == 0 { err = qid + ": candidate scores zero tokens"  return }
+			if np + len(ctoks) >= seq_len { err = qid + ": candidate too long"  return }
+			forward(ptoks[np-1], np-1)
+			means = append(means, s1_cand_mean(np, ctoks))
+			ntoks = ntoks + len(ctoks)
+			ci = ci + 1
+		}
+		temp := s1_t_choice
+		if qtype == "noul" { temp = s1_t_noul }
+		if qtype == "score" { temp = s1_t_score }
+		probs = s1_softmax(means, temp)
 	}
-	np := len(ptoks)
-	if np + 32 >= seq_len { err = qid + ": state too long"  return }
-	ntoks = np
-	start := cache_common(ptoks)
-	if start >= np { start = np - 1 }
-	i := start
-	while i < np { forward(ptoks[i], i)  i = i + 1 }
-	// advertise only the prefix: candidate KV positions [np, ...) are scratch
-	i = 0
-	while i < np { poke_i32(cache_buf, i*4, ptoks[i])  i = i + 1 }
-	cache_len = np
-	means := []float{}
-	ci := 0
-	while ci < len(cands) {
-		ctoks := s1_cand_toks(prefix, ptoks, cands[ci])
-		if len(ctoks) == 0 { err = qid + ": candidate scores zero tokens"  return }
-		if np + len(ctoks) >= seq_len { err = qid + ": candidate too long"  return }
-		forward(ptoks[np-1], np-1)
-		means = append(means, s1_cand_mean(np, ctoks))
-		ntoks = ntoks + len(ctoks)
-		ci = ci + 1
-	}
-	temp := s1_t_choice
-	if qtype == "noul" { temp = s1_t_noul }
-	if qtype == "score" { temp = s1_t_score }
-	probs := s1_softmax(means, temp)
 	bi := 0
 	i = 1
 	while i < len(probs) { if probs[i] > probs[bi] { bi = i }  i = i + 1 }
@@ -1946,6 +1989,14 @@ func main() {
 	if env("ANVIL_S1_CHAT") == "1" { s1_chat = 1  println("systemone: chat-template wrap on") }
 	if env("ANVIL_S1_CAND") == "desc" { s1_cand_desc = 1  println("systemone: scoring criteria descriptions") }
 	if env("ANVIL_S1_FIRSTTOK") == "1" { s1_first_tok = 1 }
+	sh := env("ANVIL_S1_HEAD")
+	if len(sh) > 0 {
+		s1_head = read_head(sh)
+		i := 0
+		while i < s1_head.nr { if s1_head.names[i] == "yes" { s1_yes = i }  i = i + 1 }
+		if s1_yes < 0 { println("ANVIL_S1_HEAD: no 'yes' route — head scoring off")  s1_head = zero_head() }
+		else { println("systemone: entailment head " + sh + " (yes_idx=" + str(s1_yes) + ")") }
+	}
 	if conf_qhat > 0.0 { println("conformal qhat (default head): " + str(conf_qhat)) }
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
