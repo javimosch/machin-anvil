@@ -688,6 +688,9 @@ var conf_qhat = 0.0         // ANVIL_CONFORMAL_QHAT — global qhat for the defa
 var s1_t_choice = 1.0       // ANVIL_S1_T_* — /v1/systemone candidate softmax temps
 var s1_t_noul = 1.0
 var s1_t_score = 1.0
+var s1_chat = 0             // ANVIL_S1_CHAT=1 — wrap prefix as a user turn (helps chat-tuned trunks)
+var s1_cand_desc = 0        // ANVIL_S1_CAND=desc — score criteria descriptions instead of bare keys
+var s1_first_tok = 0        // ANVIL_S1_FIRSTTOK=1 — first-token logprob only (mean dilutes short labels)
 var gate_minconf = 0.0
 
 func bearer_key(req) (k) {
@@ -1555,6 +1558,7 @@ func s1_cand_mean(np, ctoks) (m) {
 	m = 0.0
 	if len(ctoks) == 0 { return }
 	sum := s1_logp(ctoks[0])
+	if s1_first_tok == 1 { m = sum  return }
 	i := 1
 	while i < len(ctoks) {
 		forward(ctoks[i-1], np+i-1)
@@ -1570,6 +1574,11 @@ func s1_cand_mean(np, ctoks) (m) {
 // prefix-preserving at the join — jev-local does the same)
 func s1_cand_toks(prefix, ptoks, cand) (ctoks) {
 	ctoks = []int{}
+	if s1_chat == 1 {
+		// prompt ends at the assistant header — the candidate is the reply's
+		// first tokens; encode the continuation directly
+		return bpe_encode_raw(" " + cand)
+	}
 	full := bpe_encode_raw(prefix + " " + cand)
 	k := 0
 	n := len(ptoks)
@@ -1641,6 +1650,16 @@ func s1_answer(qid, qv, state) (aj, err, ntoks) {
 		i := 0
 		while i < len(cv) { optvals = append(optvals, unq(cv[i]))  i = i + 1 }
 		cands = ck
+		if s1_cand_desc == 1 {
+			// description verbalizers beat bare keys on base trunks
+			dc := []string{}
+			i = 0
+			while i < len(optkeys) {
+				if i < len(optvals) && len(optvals[i]) > 0 { dc = append(dc, optvals[i]) } else { dc = append(dc, optkeys[i]) }
+				i = i + 1
+			}
+			cands = dc
+		}
 	}
 	if qtype == "score" {
 		levels = []string{}
@@ -1648,8 +1667,12 @@ func s1_answer(qid, qv, state) (aj, err, ntoks) {
 		i := 0
 		while i < len(lv) { levels = append(levels, unq(lv[i]))  i = i + 1 }
 		if len(levels) < 2 || len(levels) > 10 { err = qid + ": score needs 2..10 levels"  return }
-		i = 0
-		while i < len(levels) { cands = append(cands, str(i))  i = i + 1 }
+		if s1_cand_desc == 1 {
+			cands = levels
+		} else {
+			i = 0
+			while i < len(levels) { cands = append(cands, str(i))  i = i + 1 }
+		}
 	}
 	if qtype != "noul" && qtype != "choice" && qtype != "score" {
 		err = qid + ": unknown question type " + qtype
@@ -1657,6 +1680,11 @@ func s1_answer(qid, qv, state) (aj, err, ntoks) {
 	}
 	prefix := s1_prefix(state, instr, optkeys, optvals, levels, ntrue, nfalse)
 	ptoks := bpe_encode_raw(prefix)
+	if s1_chat == 1 {
+		cm := ChatMsg{}  cm.role = "user"  cm.content = prefix
+		cms := []ChatMsg{}  cms = append(cms, cm)
+		ptoks = chat_tokens(cms)
+	}
 	np := len(ptoks)
 	if np + 32 >= seq_len { err = qid + ": state too long"  return }
 	ntoks = np
@@ -1915,6 +1943,9 @@ func main() {
 	if stn > 0.0 { s1_t_noul = stn }
 	sts := parse_float(env("ANVIL_S1_T_SCORE"))
 	if sts > 0.0 { s1_t_score = sts }
+	if env("ANVIL_S1_CHAT") == "1" { s1_chat = 1  println("systemone: chat-template wrap on") }
+	if env("ANVIL_S1_CAND") == "desc" { s1_cand_desc = 1  println("systemone: scoring criteria descriptions") }
+	if env("ANVIL_S1_FIRSTTOK") == "1" { s1_first_tok = 1 }
 	if conf_qhat > 0.0 { println("conformal qhat (default head): " + str(conf_qhat)) }
 	// head pooling: mhd2 heads self-describe the (kind, layer) tap they were
 	// trained on — mixed pooling configs coexist on one instance. ANVIL_POOL=
