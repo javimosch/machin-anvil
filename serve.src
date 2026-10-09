@@ -1654,6 +1654,15 @@ func s1_answer(qid, qv, state) (aj, err, ntoks) {
 	}
 	if qtype == "choice" {
 		ck, cv := s1_fields(crit)
+		if len(ck) == 0 {
+			// options-array shorthand: "options": ["billing", "technical"]
+			// (some clients send this instead of a criteria map)
+			op, _ := json_get(qv, ".options")
+			oe := s1_elems(op)
+			i := 0
+			while i < len(oe) { ck = append(ck, unq(oe[i]))  i = i + 1 }
+			cv = []string{}
+		}
 		if len(ck) == 0 { err = qid + ": choice criteria must not be empty"  return }
 		if len(ck) > 255 { err = qid + ": choice accepts up to 255 options"  return }
 		optkeys = ck
@@ -1819,7 +1828,9 @@ func handle_systemone(req) (res) {
 	}
 	mu_rel <- 1
 	if len(errmsg) > 0 {
-		res = ok_json("{\"error\":{\"message\":\"" + json_esc(errmsg) + "\",\"type\":\"invalid_request_error\"}}")
+		etype := "invalid_request_error"
+		if contains(errmsg, "too long") { etype = "max_tokens_exceeded" }
+		res = ok_json("{\"error\":{\"message\":\"" + json_esc(errmsg) + "\",\"type\":\"" + etype + "\"}}")
 		res.status = "422 Unprocessable Entity"
 		return
 	}
