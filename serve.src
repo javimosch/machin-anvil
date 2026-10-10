@@ -1288,7 +1288,10 @@ func handle_route(req) (res) {
 	if len(content) > 0 { body = body + ",\"content\":\"" + json_esc(content) + "\"" }
 	body = body + ",\"latency_ms\":" + str(lat) + "}"
 	res = ok_json(body)
-	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\"}")
+	lj := "{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\""
+	if set_size >= 0 { lj = lj + ",\"set_size\":" + str(set_size) }
+	lj = lj + "}"
+	log_decision(lj)
 	return
 }
 
