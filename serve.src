@@ -470,7 +470,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
-	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_EXPERT_QHAT=dom:0.648,... / ANVIL_CONFORMAL_QHAT (conformal gate, replaces minconf floor on the lane)\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"ANVIL_S1_T[_CHOICE|_NOUL|_SCORE] (systemone candidate softmax temps, default 1.0)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
+	g = g + "\"env\":[\"ANVIL_HEAD|NOUL|SCORE|GATE=<file.head>\",\"ANVIL_EXPERTS=dom:file.head,...\",\"ANVIL_EXPERT_MINCONF=dom:0.5,...\",\"ANVIL_SHADOW=dom:file.head (log-only candidate lane scored on the same features)\",\"ANVIL_EXPERT_QHAT=dom:0.648,... / ANVIL_CONFORMAL_QHAT (conformal gate, replaces minconf floor on the lane)\",\"ANVIL_ROUTE_MINCONF\",\"ANVIL_GATE_MINCONF\",\"ANVIL_KEYS=k1,k2\",\"ANVIL_TENANTS=key:file.head,...\",\"ANVIL_LOG=decisions.jsonl\",\"ANVIL_FEEDBACK_LOG=feedback.jsonl\",\"ANVIL_DELEGATE_URL|KEY|MODEL|SYS\",\"ANVIL_POOL=max|mean (legacy override)\",\"ANVIL_S1_T[_CHOICE|_NOUL|_SCORE] (systemone candidate softmax temps, default 1.0)\",\"COLIBRI_THREADS\",\"COLIBRI_NOBATCH=1\"],"
 	g = g + "\"gotchas\":[\"expert pin skips gate AND noul/score — the expert's own 'escalate' class is its abstention path\",\"pooled heads reject prompts >context with 400\",\"kind-0 'last' taps are the final-layer snapshot only\",\"per-request min_conf beats every env floor\"],"
 	g = g + "\"delegation\":\"action=delegate + reason: low_confidence|low_gate_confidence|route_escalate|noul_escalate|conformal_abstain|head_trunk_disagree — a confident answer requires head AND trunk to agree when execute:true\"}"
 	res = ok_json(g)
@@ -778,6 +778,9 @@ var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
 var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
 var emin_vals = []float{}   //   confidence floor; overrides the global floor
+var sh_domains = []string{} // ANVIL_SHADOW="dom:file.head,..." — per-lane
+var sh_heads = []Head{}     //   candidate heads scored on the same features,
+                            //   logged for divergence; never served to clients
 var cq_names = []string{}   // ANVIL_EXPERT_QHAT="mairie_c:0.648,..." — per-lane
 var cq_vals = []float{}     //   conformal qhat (set = {p >= 1-qhat}); 0=off
 var conf_qhat = 0.0         // ANVIL_CONFORMAL_QHAT — global qhat for the default head
@@ -1321,6 +1324,23 @@ func handle_route(req) (res) {
 			}
 		}
 	}
+	// shadow lane: score the same pooled features against the registered
+	// candidate head while still holding the model lock (s_x is request-scoped
+	// — scoring after mu_rel would race the next prefill). Log-only divergence
+	// signal; costs one head matmul, zero extra prefill, never in the response.
+	sh_route := ""
+	sh_conf := 0.0
+	sd := expert
+	if len(sd) == 0 { sd = domain }
+	i := 0
+	while i < len(sh_domains) {
+		if sh_domains[i] == sd {
+			sb := head_best(sh_heads[i])
+			sh_route = sh_heads[i].names[sb]
+			sh_conf = peek_f32(sh_heads[i].probs, sb*4)
+		}
+		i = i + 1
+	}
 	mu_rel <- 1
 	via := ""
 	if dr.execute && action == "delegate" && len(delegate_url) > 0 {
@@ -1386,6 +1406,10 @@ func handle_route(req) (res) {
 	res = ok_json(body)
 	lj := "{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\""
 	if set_size >= 0 { lj = lj + ",\"set_size\":" + str(set_size) }
+	if len(sh_route) > 0 {
+		lj = lj + ",\"shadow\":{\"route\":\"" + json_esc(sh_route) + "\",\"conf\":" + str(sh_conf)
+		if sh_route == route { lj = lj + ",\"agree\":true}" } else { lj = lj + ",\"agree\":false}" }
+	}
 	lj = lj + "}"
 	log_decision(lj)
 	met_acq <- 1
@@ -2071,6 +2095,20 @@ func main() {
 			i = i + 1
 		}
 		println("experts: " + str(len(edomains)) + " pinned lane(s)")
+	}
+	shx := env("ANVIL_SHADOW")
+	if len(shx) > 0 {
+		shp := split(shx, ",")
+		i := 0
+		while i < len(shp) {
+			ssep := index(shp[i], ":")
+			if ssep > 0 {
+				sh_domains = append(sh_domains, trim(substr(shp[i], 0, ssep)))
+				sh_heads = append(sh_heads, read_head(trim(substr(shp[i], ssep + 1, len(shp[i])))))
+			}
+			i = i + 1
+		}
+		println("shadow: " + str(len(sh_domains)) + " candidate lane(s) (log-only)")
 	}
 	// metric arrays are per-lane with a trailing "default" bucket for
 	// requests that don't resolve to a pinned expert (gate fallback).
