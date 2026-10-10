@@ -45,6 +45,20 @@ type ChatReq struct {
 var model_id = "tinyllama-1.1b-q80"
 var mu_acq = make(chan int)
 var mu_rel = make(chan int)
+var met_acq = make(chan int)
+var met_rel = make(chan int)
+var boot_ms = 0
+var rt_tc = 0.0
+var rt_del = 0.0
+var rt_lat_sum = 0.0
+var rt_lat_cnt = 0.0
+var lane_req = []float{}
+var lane_del = []float{}
+var lane_ss_sum = []float{}
+var lane_ss_cnt = []float{}
+var lane_names_out = []string{}
+var ep_names = []string{"chat", "decide", "assess", "noul", "score", "systemone"}
+var ep_counts = []float{0, 0, 0, 0, 0, 0}
 
 // ---- skills: trigger-matched guidance injected into the system prompt.
 // In-context "finetuning": curated instructions + few-shot examples make the
@@ -150,6 +164,49 @@ func mutex_srv(acq, rel) {
 		v := <-rel
 		if v < 0 { break }
 	}
+}
+
+// Prometheus-style metrics. IMPORTANT: request-handler strings live in a
+// per-request arena that is recycled — never store request-built strings in
+// globals (that corrupted the registry and segfaulted). Store NUMBERS only;
+// label strings are composed at scrape time from startup-stable names
+// (edomains, ep_names).
+func met_ep(ix) {
+	met_acq <- 1
+	ep_counts[ix] = ep_counts[ix] + 1
+	met_rel <- 1
+}
+
+func lane_ix(expert) (ix) {
+	ix = 0
+	while ix < len(edomains) { if edomains[ix] == expert { return }  ix = ix + 1 }
+	ix = len(edomains) // "default"/unmatched bucket
+	return
+}
+
+func handle_metrics() (res) {
+	met_acq <- 1
+	out := "anvil_requests_total{ep=\"route\",action=\"tool_call\"} " + str(rt_tc) + "\n"
+	out = out + "anvil_requests_total{ep=\"route\",action=\"delegate\"} " + str(rt_del) + "\n"
+	out = out + "anvil_decision_latency_ms_sum{ep=\"route\"} " + str(rt_lat_sum) + "\n"
+	out = out + "anvil_decision_latency_ms_count{ep=\"route\"} " + str(rt_lat_cnt) + "\n"
+	i := 0
+	while i < len(lane_names_out) {
+		l := lane_names_out[i]
+		out = out + "anvil_lane_requests_total{expert=\"" + l + "\"} " + str(lane_req[i]) + "\n"
+		out = out + "anvil_delegates_total{expert=\"" + l + "\"} " + str(lane_del[i]) + "\n"
+		if lane_ss_cnt[i] > 0 {
+			out = out + "anvil_set_size_sum{lane=\"" + l + "\"} " + str(lane_ss_sum[i]) + "\n"
+			out = out + "anvil_set_size_count{lane=\"" + l + "\"} " + str(lane_ss_cnt[i]) + "\n"
+		}
+		i = i + 1
+	}
+	j := 0
+	while j < len(ep_names) { out = out + "anvil_http_requests_total{ep=\"" + ep_names[j] + "\"} " + str(ep_counts[j]) + "\n"  j = j + 1 }
+	met_rel <- 1
+	out = out + "anvil_uptime_seconds " + str((now_ms() - boot_ms) / 1000) + "\n"
+	res = response("200 OK", "text/plain; version=0.0.4", out)
+	return
 }
 
 // llama3 chat template at the TOKEN level:
@@ -1292,6 +1349,15 @@ func handle_route(req) (res) {
 	if set_size >= 0 { lj = lj + ",\"set_size\":" + str(set_size) }
 	lj = lj + "}"
 	log_decision(lj)
+	met_acq <- 1
+	mix := lane_ix(expert)
+	lane_req[mix] = lane_req[mix] + 1
+	if action == "delegate" { rt_del = rt_del + 1  lane_del[mix] = lane_del[mix] + 1 }
+	if action == "tool_call" { rt_tc = rt_tc + 1 }
+	rt_lat_sum = rt_lat_sum + float(lat)
+	rt_lat_cnt = rt_lat_cnt + 1
+	if set_size >= 0 { lane_ss_sum[mix] = lane_ss_sum[mix] + float(set_size)  lane_ss_cnt[mix] = lane_ss_cnt[mix] + 1 }
+	met_rel <- 1
 	return
 }
 
@@ -1854,13 +1920,13 @@ func api_route(req) (res) {
 		return
 	}
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
-	if req.method == "POST" && req.path == "/v1/chat/completions" { res = handle_chat(req)  return }
-	if req.method == "POST" && req.path == "/v1/decide" { res = handle_decide(req)  return }
+	if req.method == "POST" && req.path == "/v1/chat/completions" { met_ep(0)  res = handle_chat(req)  return }
+	if req.method == "POST" && req.path == "/v1/decide" { met_ep(1)  res = handle_decide(req)  return }
 	if req.method == "POST" && req.path == "/v1/route" { res = handle_route(req)  return }
-	if req.method == "POST" && req.path == "/v1/assess" { res = handle_assess(req)  return }
-	if req.method == "POST" && req.path == "/v1/noul" { res = handle_noul(req)  return }
-	if req.method == "POST" && req.path == "/v1/score" { res = handle_score(req)  return }
-	if req.method == "POST" && req.path == "/v1/systemone" { res = handle_systemone(req)  return }
+	if req.method == "POST" && req.path == "/v1/assess" { met_ep(2)  res = handle_assess(req)  return }
+	if req.method == "POST" && req.path == "/v1/noul" { met_ep(3)  res = handle_noul(req)  return }
+	if req.method == "POST" && req.path == "/v1/score" { met_ep(4)  res = handle_score(req)  return }
+	if req.method == "POST" && req.path == "/v1/systemone" { met_ep(5)  res = handle_systemone(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
 	if req.method == "GET" && req.path == "/_health" {
 		hc, hout, herr := exec("echo $PPID")
@@ -1869,6 +1935,7 @@ func api_route(req) (res) {
 	}
 	if req.method == "GET" && req.path == "/guide" { res = handle_guide()  return }
 	if req.method == "GET" && req.path == "/llms.txt" { res = handle_llms()  return }
+	if req.method == "GET" && (req.path == "/metrics" || req.path == "/_metrics") { res = handle_metrics()  return }
 	if req.method == "GET" && req.path == "/v1/whoami" { res = handle_whoami(req)  return }
 	if req.method == "POST" && req.path == "/_shutdown" { res = handle_shutdown(req)  return }
 	if req.path == "/_qhat" { res = handle_qhat(req)  return }
@@ -1963,6 +2030,13 @@ func main() {
 		}
 		println("experts: " + str(len(edomains)) + " pinned lane(s)")
 	}
+	// metric arrays are per-lane with a trailing "default" bucket for
+	// requests that don't resolve to a pinned expert (gate fallback).
+	i := 0
+	while i < len(edomains) { lane_names_out = append(lane_names_out, edomains[i])  i = i + 1 }
+	lane_names_out = append(lane_names_out, "default")
+	i = 0
+	while i < len(lane_names_out) { lane_req = append(lane_req, 0)  lane_del = append(lane_del, 0)  lane_ss_sum = append(lane_ss_sum, 0)  lane_ss_cnt = append(lane_ss_cnt, 0)  i = i + 1 }
 	emc_env := env("ANVIL_EXPERT_MINCONF")
 	if len(emc_env) > 0 {
 		ep := split(emc_env, ",")
@@ -2088,6 +2162,8 @@ func main() {
 	w := 0
 	while w < n_workers { go worker(jobs, done)  w = w + 1 }
 	go mutex_srv(mu_acq, mu_rel)
+	go mutex_srv(met_acq, met_rel)
+	boot_ms = now_ms()
 	println("colibri serve: model=" + model_id + " dim=" + str(dim) + " layers=" + str(n_layers) + " workers=" + str(n_workers) + " skills=" + str(len(skills)) + " loaded in " + str(now_ms() - t0) + " ms")
 	// ANVIL_BIND=<addr> binds a specific interface (e.g. 127.0.0.1 when the
 	// mtlm-router wrapper runs the daemon loopback-only by default); unset =
