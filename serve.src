@@ -464,6 +464,9 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"POST\",\"path\":\"/_shutdown\",\"doc\":\"token-gated (or loopback-only without keys) shutdown\"},"
 	g = g + "{\"method\":\"GET|POST\",\"path\":\"/_qhat\",\"doc\":\"live conformal recalibration — read or set per-lane qhat (ACI/flywheel hook), same gating as /_shutdown\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/health\",\"doc\":\"liveness (alias /_health)\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/livez\",\"doc\":\"k8s liveness — always 200 while serving\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/readyz\",\"doc\":\"k8s readiness — 503 until a head or expert lane is loaded\"},"
+	g = g + "{\"method\":\"GET\",\"path\":\"/v1/lanes\",\"doc\":\"per-lane readiness: routes, qhat, minconf, gate\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
@@ -586,6 +589,42 @@ func handle_whoami(req) (res) {
 	}
 	exp = exp + "]"
 	res = ok_json("{\"model\":\"" + model_id + "\",\"key\":\"" + mask + "\",\"head\":\"" + tn + "\",\"experts\":" + exp + "}")
+	return
+}
+
+func handle_ready() (res) {
+	// KServe-style readiness: 200 only when at least one decision surface is
+	// loaded (default head or an expert). /livez stays unconditional.
+	n_lanes := len(edomains)
+	if hd_nr == 0 && n_lanes == 0 {
+		res = ok_json("{\"ready\":false,\"reason\":\"no decision head or expert loaded\"}")
+		res.status = "503 Service Unavailable"
+		return
+	}
+	res = ok_json("{\"ready\":true,\"model\":\"" + model_id + "\",\"head_routes\":" + str(hd_nr) + ",\"experts\":" + str(n_lanes) + ",\"gate_domains\":" + str(ghead.nr) + "}")
+	return
+}
+
+func handle_lanes() (res) {
+	// Per-lane readiness detail: names, class counts, calibration state.
+	// All names are startup-stable strings (never request-arena).
+	b := "{\"model\":\"" + model_id + "\",\"default\":{\"routes\":" + str(hd_nr)
+	if conf_qhat > 0.0 { b = b + ",\"qhat\":" + str(conf_qhat) }
+	b = b + "},\"lanes\":["
+	i := 0
+	while i < len(edomains) {
+		if i > 0 { b = b + "," }
+		b = b + "{\"name\":\"" + json_esc(edomains[i]) + "\",\"routes\":" + str(eheads[i].nr)
+		j := 0
+		while j < len(cq_names) { if cq_names[j] == edomains[i] { b = b + ",\"qhat\":" + str(cq_vals[j]) }  j = j + 1 }
+		j = 0
+		while j < len(emin_names) { if emin_names[j] == edomains[i] { b = b + ",\"minconf\":" + str(emin_vals[j]) }  j = j + 1 }
+		b = b + "}"
+		i = i + 1
+	}
+	b = b + "]"
+	if ghead.nr > 0 { b = b + ",\"gate\":{\"domains\":" + str(ghead.nr) + ",\"minconf\":" + str(gate_minconf) + "}" }
+	res = ok_json(b + "}")
 	return
 }
 
@@ -1928,6 +1967,9 @@ func api_route(req) (res) {
 	if req.method == "POST" && req.path == "/v1/score" { met_ep(4)  res = handle_score(req)  return }
 	if req.method == "POST" && req.path == "/v1/systemone" { met_ep(5)  res = handle_systemone(req)  return }
 	if req.method == "GET" && req.path == "/health" { res = ok_json("{\"ok\":true,\"model\":\"" + model_id + "\"}")  return }
+	if req.method == "GET" && req.path == "/livez" { res = ok_json("{\"ok\":true}")  return }
+	if req.method == "GET" && req.path == "/readyz" { res = handle_ready()  return }
+	if req.method == "GET" && req.path == "/v1/lanes" { res = handle_lanes()  return }
 	if req.method == "GET" && req.path == "/_health" {
 		hc, hout, herr := exec("echo $PPID")
 		res = ok_json("{\"ok\":true,\"service\":\"anvil-serve\",\"model\":\"" + model_id + "\",\"pid\":" + trim(hout) + "}")
