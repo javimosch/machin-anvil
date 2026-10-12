@@ -1301,6 +1301,16 @@ func handle_route(req) (res) {
 	}
 	conf := peek_f32(hd_probs, best*4)
 	route := hd_names[best]
+	// top1−top2 probability gap — a client-side margin-policy signal
+	// (IntentGuard-style: small margin = torn decision even on singleton sets)
+	second := 0.0
+	i := 0
+	while i < hd_nr {
+		p := peek_f32(hd_probs, i*4)
+		if i != best && p > second { second = p }
+		i = i + 1
+	}
+	margin := conf - second
 	action := "generate"
 	if route != "chat" { action = "tool_call" }
 	reason := "ok"
@@ -1483,6 +1493,7 @@ func handle_route(req) (res) {
 	body := "{\"object\":\"route\",\"model\":\"" + model_id + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"confidence\":" + str(conf) + ",\"p_yes\":" + str(py)
 	if len(ghead.names) > 0 { body = body + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_confidence\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\"" }
 	if set_size >= 0 { body = body + ",\"set_size\":" + str(set_size) + ",\"qhat\":" + str(qhat) }
+	body = body + ",\"margin\":" + str(margin)
 	if len(cands) > 0 { body = body + ",\"candidates\":[" + cands + "]" }
 	if len(via) > 0 { body = body + ",\"via\":\"" + json_esc(via) + "\"" }
 	if len(tier) > 0 { body = body + ",\"tier\":\"" + json_esc(tier) + "\"" }
@@ -1493,6 +1504,7 @@ func handle_route(req) (res) {
 	res = ok_json(body)
 	lj := "{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\""
 	if set_size >= 0 { lj = lj + ",\"set_size\":" + str(set_size) }
+	lj = lj + ",\"margin\":" + str(margin)
 	if len(sh_route) > 0 {
 		lj = lj + ",\"shadow\":{\"route\":\"" + json_esc(sh_route) + "\",\"conf\":" + str(sh_conf)
 		if sh_route == route { lj = lj + ",\"agree\":true}" } else { lj = lj + ",\"agree\":false}" }
