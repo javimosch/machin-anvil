@@ -1334,33 +1334,37 @@ func handle_route(req) (res) {
 		if action != "delegate" && set_size != 1 { action = "delegate"  reason = "conformal_abstain" }
 	}
 	cands := ""
-	if qhat > 0.0 && set_size > 1 {
-		// CICC-style clarification set: when the conformal set has 2..8 members
-		// the abstain is "torn between these routes", not "no idea" — return
-		// the members sorted by prob desc so a client can ask a targeted
-		// clarification ("did you mean X or Y?"). Bigger sets stay a bare
-		// abstain (genuine out-of-scope territory).
-		if set_size <= 8 {
-			picked := alloc(hd_nr * 4)
-			k := 0
-			while k < set_size {
-				bi := -1
-				bp := 0.0
-				i := 0
-				while i < hd_nr {
-					p := peek_f32(hd_probs, i*4)
-					if peek_f32(picked, i*4) < 0.5 && p >= thr && p > bp { bi = i  bp = p }
-					i = i + 1
-				}
-				if bi < 0 { k = set_size } else {
-					poke_f32(picked, bi*4, 1.0)
-					if len(cands) > 0 { cands = cands + "," }
-					cands = cands + "{\"route\":\"" + json_esc(hd_names[bi]) + "\",\"confidence\":" + str(bp) + "}"
-				}
-				k = k + 1
+	// Clarification shortlist on conformal abstains:
+	//   set_size 2..8 → the set members ("torn between these routes")
+	//   set_size 0    → top-2 argmax routes (empty set = nothing clears the
+	//                   bar; the model's best guesses still aid HITL triage —
+	//                   explicitly NOT set members, no coverage claim)
+	//   set_size > 8  → bare abstain (genuine out-of-scope territory)
+	cand_limit := 0
+	cand_thr := thr
+	if qhat > 0.0 && set_size >= 0 && set_size != 1 {
+		if set_size == 0 { cand_limit = 2  cand_thr = 0.0 } else if set_size <= 8 { cand_limit = set_size }
+	}
+	if cand_limit > 0 {
+		picked := alloc(hd_nr * 4)
+		k := 0
+		while k < cand_limit {
+			bi := -1
+			bp := 0.0
+			i := 0
+			while i < hd_nr {
+				p := peek_f32(hd_probs, i*4)
+				if peek_f32(picked, i*4) < 0.5 && p >= cand_thr && p > bp { bi = i  bp = p }
+				i = i + 1
 			}
-			free(picked)
+			if bi < 0 { k = cand_limit } else {
+				poke_f32(picked, bi*4, 1.0)
+				if len(cands) > 0 { cands = cands + "," }
+				cands = cands + "{\"route\":\"" + json_esc(hd_names[bi]) + "\",\"confidence\":" + str(bp) + "}"
+			}
+			k = k + 1
 		}
+		free(picked)
 	}
 
 	call_name := ""
