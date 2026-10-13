@@ -1328,6 +1328,11 @@ func handle_route(req) (res) {
 	// On a conformal lane the calibrated set replaces the hand-tuned floor.
 	if action != "delegate" && qhat <= 0.0 && conf < minconf { action = "delegate"  reason = "low_confidence" }
 	if action != "delegate" && route == "escalate" { action = "delegate"  reason = "route_escalate" }
+	// 'oos' is an abstention-path class like escalate — a confident singleton
+	// 'oos' means "I don't handle this", not "execute the oos tool". Delegating
+	// turns a confident-wrong-oos (golden-gate finding) into human triage
+	// instead of an automated wrong rejection.
+	if action != "delegate" && route == "oos" { action = "delegate"  reason = "route_oos" }
 	// conformal gate: prediction set = classes with p >= 1-qhat (qhat calibrated
 	// offline by tools/conformal_eval.py). A singleton set means "only one
 	// plausible route" — a sharper confidence signal than max-p alone. Any other
