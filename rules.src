@@ -1,0 +1,254 @@
+// ---- rules lanes: deterministic, model-free lanes (.rules.json packs) ----
+// ANVIL_EXPERTS=dom:file.rules.json loads a rulepack instead of a head.
+// When the routed/pinned expert is a rules lane, decide() synthesizes a
+// probability vector from rule evaluation — minconf/conformal/action work
+// unchanged downstream. A rule hit is a confident answer (its class at its
+// declared score); no hit answers the default_class (usually "none").
+
+var cur_text = "" // raw state text, set by head_prefill for rule eval
+
+type RulePack struct {
+	names []string
+	nr int
+	default_ix int
+	probs int
+	rk_class []int
+	rk_kind []string
+	rk_arg []string
+	rk_score []float
+	domsets []map[string]int
+	rk_dmix []int
+}
+
+var rulepacks = []RulePack{}
+var hd_rules_ix = -1   // -1 = normal head lane; >=0 index into rulepacks
+
+func ends_with(s, suf) (ok) {
+	ok = 0
+	if len(s) >= len(suf) && substr(s, len(s)-len(suf), len(s)) == suf { ok = 1 }
+	return
+}
+
+type rp_rule struct {
+	class string
+	kind string
+	arg string
+	score float
+}
+type rp_file struct {
+	classes []string
+	default_class string
+	rules []rp_rule
+}
+
+// map each rule kind=domains arg (file path, relative to the rules file)
+// to a loaded domain set; rules reference it via rk_dmix.
+func load_rulepack(path) (ix) {
+	b := read_file(path)
+	f := parse(b, rp_file{})
+	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
+	p := RulePack{}
+	p.names = f.classes
+	p.nr = len(f.classes)
+	p.probs = alloc(p.nr * 4)
+	p.default_ix = 0
+	cix := make(map[string]int)
+	i := 0
+	while i < p.nr { cix[f.classes[i]] = i  if f.classes[i] == f.default_class { p.default_ix = i }  i = i + 1 }
+	base := ""
+	sl := index(path, "/")
+	_ = sl
+	// dirname of path
+	j := len(path) - 1
+	while j >= 0 { if substr(path, j, j+1) == "/" { base = substr(path, 0, j+1)  j = -1 }  j = j - 1 }
+	i = 0
+	while i < len(f.rules) {
+		r := f.rules[i]
+		ci := cix[r.class]
+		p.rk_class = append(p.rk_class, ci)
+		p.rk_kind = append(p.rk_kind, r.kind)
+		p.rk_score = append(p.rk_score, r.score)
+		dmix := -1
+		arg := r.arg
+		if r.kind == "domains" {
+			dp := arg
+			if len(base) > 0 && substr(arg, 0, 1) != "/" { dp = base + arg }
+			ds := make(map[string]int)
+			lines := split(read_file(dp), "\n")
+			k := 0
+			while k < len(lines) {
+				d := trim(to_lower(lines[k]))
+				if len(d) > 0 && substr(d, 0, 1) != "#" { ds[d] = 1 }
+				k = k + 1
+			}
+			p.domsets = append(p.domsets, ds)
+			dmix = len(p.domsets) - 1
+			arg = ""
+		}
+		p.rk_dmix = append(p.rk_dmix, dmix)
+		p.rk_arg = append(p.rk_arg, arg)
+		i = i + 1
+	}
+	rulepacks = append(rulepacks, p)
+	ix = len(rulepacks) - 1
+	return
+}
+
+// ---- matchers ----
+
+// digit-run at position >= nmin digits
+func has_digit_run(t, nmin) (ok) {
+	ok = 0
+	run := 0
+	i := 0
+	while i < len(t) {
+		c := substr(t, i, i+1)
+		if c >= "0" && c <= "9" {
+			run = run + 1
+			if run >= nmin { ok = 1  return }
+		} else { run = 0 }
+		i = i + 1
+	}
+	return
+}
+
+// card candidates: digit groups joined by single space/dash separators
+// ("4111 1111 1111 1111" -> "4111111111111111"); phones stay out (<12 digits).
+func card_candidates(t) (out) {
+	out = []string{}
+	cur := ""
+	i := 0
+	while i < len(t) {
+		c := substr(t, i, i+1)
+		if c >= "0" && c <= "9" { cur = cur + c } else {
+			nxt := ""
+			if i+1 < len(t) { nxt = substr(t, i+1, i+2) }
+			if (c == " " || c == "-") && len(cur) > 0 && nxt >= "0" && nxt <= "9" {
+			} else {
+				if len(cur) >= 12 { out = append(out, cur) }
+				cur = ""
+			}
+		}
+		i = i + 1
+	}
+	if len(cur) >= 12 { out = append(out, cur) }
+	return
+}
+
+func luhn_ok(digits) (ok) {
+	ok = 0
+	sum := 0
+	dbl := 0
+	i := len(digits) - 1
+	while i >= 0 {
+		d := byte_at(bytes(digits), i) - 48
+		if dbl == 1 { d = d * 2  if d > 9 { d = d - 9 } }
+		sum = sum + d
+		dbl = 1 - dbl
+		i = i - 1
+	}
+	if len(digits) >= 12 && sum % 10 == 0 { ok = 1 }
+	return
+}
+
+// IBAN mod-97: convert letters to digits (A=10..Z=35), accumulate remainder
+func iban_ok(t) (ok) {
+	ok = 0
+	// find IBAN-ish token: CC + 2 digits + up to 30 alnum (spaces allowed)
+	m := regex_find(t, "[A-Za-z]{2}[0-9]{2}[ 0-9A-Za-z]{11,32}")
+	if len(m) == 0 { return }
+	// move first 4 chars to end, map letters
+	seq := substr(m, 4, len(m)) + substr(m, 0, 4)
+	rem := 0
+	i := 0
+	while i < len(seq) {
+		ch := byte_at(bytes(seq), i)
+		if ch == 32 { i = i + 1  continue }
+		if ch >= 48 && ch <= 57 { rem = (rem * 10 + (ch - 48)) % 97 } else {
+			a := ch
+			if a >= 97 { a = a - 32 }
+			v := a - 55
+			if v < 10 || v > 35 { return }
+			rem = (rem * 100 + v) % 97
+		}
+		i = i + 1
+	}
+	if rem == 1 { ok = 1 }
+	return
+}
+
+// does text contain domain dom as a bounded token (non-alnum edges)?
+func has_domain(t, dom) (ok) {
+	ok = 0
+	off := 0
+	for {
+		i := index(substr(t, off, len(t)), dom)
+		if i < 0 { return }
+		p := off + i
+		before := 1
+		if p > 0 {
+			c := byte_at(bytes(t), p-1)
+			if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { before = 0 }
+		}
+		after := 1
+		e := p + len(dom)
+		if e < len(t) {
+			c := byte_at(bytes(t), e)
+			if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { after = 0 }
+		}
+		if before == 1 && after == 1 { ok = 1  return }
+		off = e
+		if off >= len(t) { return }
+	}
+	return
+}
+
+func rule_fires(p, j, lowtext) (hit) {
+	hit = 0
+	kind := p.rk_kind[j]
+	arg := p.rk_arg[j]
+	if kind == "regex" { if regex_match(lowtext, arg) { hit = 1 } }
+	if kind == "contains" { if index(lowtext, arg) >= 0 { hit = 1 } }
+	if kind == "digits" { hit = has_digit_run(lowtext, 9) }
+	if kind == "luhn" {
+		runs := card_candidates(lowtext)
+		i := 0
+		while i < len(runs) { if luhn_ok(runs[i]) == 1 { hit = 1  return }  i = i + 1 }
+	}
+	if kind == "iban" { hit = iban_ok(cur_text) }
+	if kind == "domains" {
+		ds := p.domsets[p.rk_dmix[j]]
+		doms := keys(ds)
+		i := 0
+		while i < len(doms) { if has_domain(lowtext, doms[i]) == 1 { hit = 1  return }  i = i + 1 }
+	}
+	return
+}
+
+// evaluate a rulepack against cur_text; fills hd_* as a confident head would.
+func rules_decide(ix) (best) {
+	p := rulepacks[ix]
+	hd_names = p.names
+	hd_nr = p.nr
+	hd_probs = p.probs
+	i := 0
+	while i < p.nr { poke_f32(hd_probs, i*4, 0.0)  i = i + 1 }
+	low := to_lower(cur_text)
+	best = p.default_ix
+	wscore := 0.99
+	j := 0
+	while j < len(p.rk_class) {
+		if rule_fires(p, j, low) == 1 {
+			best = p.rk_class[j]
+			wscore = p.rk_score[j]
+			if wscore <= 0.0 || wscore > 0.999 { wscore = 0.999 }
+			j = len(p.rk_class)
+		}
+		j = j + 1
+	}
+	rem := (1.0 - wscore) / float(p.nr - 1)
+	i = 0
+	while i < p.nr { if i != best { poke_f32(hd_probs, i*4, rem) }  i = i + 1 }
+	poke_f32(hd_probs, best*4, wscore)
+	return
+}

@@ -774,6 +774,7 @@ func zero_head() (h) {
 var ghead = zero_head()
 var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
+var erules_ix = []int{}    // parallel to edomains: >=0 rulepack index, -1 head lane
 var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
 var emin_vals = []float{}   //   confidence floor; overrides the global floor
 var sh_domains = []string{} // ANVIL_SHADOW="dom:file.head,..." — per-lane
@@ -901,6 +902,7 @@ func log_decision(line) {
 // hidden in s_x. Returns 1 ok / 0 too-long. On ok the caller HOLDS the model
 // lock — score the head, then mu_rel <- 1.
 func head_prefill(state, ctx) (ok) {
+	cur_text = state
 	lk := <-mu_acq
 	lk = lk
 	ok = head_prefill_locked(state, ctx)
@@ -1214,7 +1216,7 @@ func handle_route(req) (res) {
 		}
 		i := 0
 		while i < len(edomains) {
-			if edomains[i] == dr.expert { set_head(eheads[i])  expert = dr.expert  domain = dr.expert  gconf = 1.0  pinned = 1 }
+			if edomains[i] == dr.expert { set_head(eheads[i])  hd_rules_ix = erules_ix[i]  expert = dr.expert  domain = dr.expert  gconf = 1.0  pinned = 1 }
 			i = i + 1
 		}
 		if pinned == 0 {
@@ -1236,7 +1238,7 @@ func handle_route(req) (res) {
 		set_head(def_head)
 		i := 0
 		while i < len(edomains) {
-			if edomains[i] == domain { set_head(eheads[i])  expert = domain }
+			if edomains[i] == domain { set_head(eheads[i])  hd_rules_ix = erules_ix[i]  expert = domain }
 			i = i + 1
 		}
 		if gconf < gmc {
@@ -2192,8 +2194,15 @@ func main() {
 		while i < len(xp) {
 			sep := index(xp[i], ":")
 			if sep > 0 {
+				ef := trim(substr(xp[i], sep + 1, len(xp[i])))
 				edomains = append(edomains, trim(substr(xp[i], 0, sep)))
-				eheads = append(eheads, read_head(trim(substr(xp[i], sep + 1, len(xp[i])))))
+				if ends_with(ef, ".rules.json") == 1 {
+					eheads = append(eheads, Head{})
+					erules_ix = append(erules_ix, load_rulepack(ef))
+				} else {
+					eheads = append(eheads, read_head(ef))
+					erules_ix = append(erules_ix, -1)
+				}
 			}
 			i = i + 1
 		}

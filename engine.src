@@ -250,6 +250,7 @@ func set_head(h) {
 	hd_buf = h.buf  hd_nr = h.nr  hd_temp = h.temp  hd_w = h.w  hd_b = h.b
 	hd_names = h.names  hd_probs = h.probs  hd_path = h.path  hd_flags = h.flags
 	hd_feat = h.feat  hd_feats = h.feats  hd_featdim = h.featdim  hd_fbuf = h.fbuf
+	hd_rules_ix = -1
 	return
 }
 
@@ -313,6 +314,7 @@ func head_best(h) (best) {
 // run the route head on the last prefill -> hd_probs[i] = p(route_i);
 // returns best index.
 func decide() (best) {
+	if hd_rules_ix >= 0 { best = rules_decide(hd_rules_ix)  return }
 	h := cur_head()
 	best = head_best(h)
 	return
