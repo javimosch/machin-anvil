@@ -8,6 +8,7 @@
 var cur_text = "" // raw state text, set by head_prefill for rule eval
 
 type RulePack struct {
+	head Head              // optional fallback head: evaluated when no rule fires
 	names []string
 	nr int
 	default_ix int
@@ -38,6 +39,7 @@ type rp_rule struct {
 type rp_file struct {
 	classes []string
 	default_class string
+	head string            // optional .head path (relative to this file): fallback scorer
 	rules []rp_rule
 }
 
@@ -61,11 +63,18 @@ func load_rulepack(path) (ix) {
 	// dirname of path
 	j := len(path) - 1
 	while j >= 0 { if substr(path, j, j+1) == "/" { base = substr(path, 0, j+1)  j = -1 }  j = j - 1 }
+	if len(f.head) > 0 {
+		hp := f.head
+		if len(base) > 0 && substr(hp, 0, 1) != "/" { hp = base + hp }
+		p.head = read_head(hp)
+		println("rules lane " + path + ": fallback head " + hp + " (" + str(p.head.nr) + " routes)")
+	}
 	i = 0
 	while i < len(f.rules) {
 		r := f.rules[i]
 		ci := cix[r.class]
-		p.rk_class = append(p.rk_class, ci)
+		_ = i
+	p.rk_class = append(p.rk_class, ci)
 		p.rk_kind = append(p.rk_kind, r.kind)
 		p.rk_score = append(p.rk_score, r.score)
 		dmix := -1
@@ -177,28 +186,22 @@ func iban_ok(t) (ok) {
 	return
 }
 
-// does text contain domain dom as a bounded token (non-alnum edges)?
-func has_domain(t, dom) (ok) {
-	ok = 0
-	off := 0
-	for {
-		i := index(substr(t, off, len(t)), dom)
-		if i < 0 { return }
-		p := off + i
-		before := 1
-		if p > 0 {
-			c := byte_at(bytes(t), p-1)
-			if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { before = 0 }
+// domain-shaped tokens in text: [a-z0-9-]+(.[a-z0-9-]+)+ — caller checks
+// each token (and its parent suffixes) against a domain set.
+func text_domains(t) (out) {
+	out = []string{}
+	cur := ""
+	i := 0
+	while i <= len(t) {
+		c := ""
+		if i < len(t) { c = substr(t, i, i+1) }
+		if (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "-" || c == "." {
+			cur = cur + c
+		} else {
+			if len(cur) > 3 && index(cur, ".") >= 0 { out = append(out, cur) }
+			cur = ""
 		}
-		after := 1
-		e := p + len(dom)
-		if e < len(t) {
-			c := byte_at(bytes(t), e)
-			if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { after = 0 }
-		}
-		if before == 1 && after == 1 { ok = 1  return }
-		off = e
-		if off >= len(t) { return }
+		i = i + 1
 	}
 	return
 }
@@ -218,9 +221,18 @@ func rule_fires(p, j, lowtext) (hit) {
 	if kind == "iban" { hit = iban_ok(cur_text) }
 	if kind == "domains" {
 		ds := p.domsets[p.rk_dmix[j]]
-		doms := keys(ds)
+		toks := text_domains(lowtext)
 		i := 0
-		while i < len(doms) { if has_domain(lowtext, doms[i]) == 1 { hit = 1  return }  i = i + 1 }
+		while i < len(toks) {
+			d := toks[i]
+			scanning := 1
+			while scanning == 1 {
+				if has(ds, d) { hit = 1  return }
+				di := index(d, ".")
+				if di < 0 { scanning = 0 } else { d = substr(d, di+1, len(d)) }
+			}
+			i = i + 1
+		}
 	}
 	return
 }
@@ -245,6 +257,12 @@ func rules_decide(ix) (best) {
 			j = len(p.rk_class)
 		}
 		j = j + 1
+	}
+	if best == p.default_ix && p.head.nr > 0 {
+		// rules floor missed -> fall through to the lane's head
+		set_head(p.head)
+		best = head_best(p.head)
+		return
 	}
 	rem := (1.0 - wscore) / float(p.nr - 1)
 	i = 0

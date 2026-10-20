@@ -730,6 +730,7 @@ type DecideReq struct {
 	state string
 	options []string
 	context []string
+	expert string
 }
 
 // system prompt the route head was trained under (synth_tools SYSTEM).
@@ -1089,6 +1090,13 @@ func handle_decide(req) (res) {
 		return
 	}
 	apply_tenant_head(req)
+	if len(dr.expert) > 0 {
+		i := 0
+		while i < len(edomains) {
+			if edomains[i] == dr.expert { set_head(eheads[i])  hd_rules_ix = erules_ix[i] }
+			i = i + 1
+		}
+	}
 	best := decide()
 	// optional subset restriction: zero out unlisted routes, renormalize
 	if len(dr.options) > 0 {
@@ -1251,6 +1259,13 @@ func handle_route(req) (res) {
 		}
 	} else if pinned == 0 {
 		apply_tenant_head(req)
+	}
+	if len(dr.expert) > 0 {
+		i := 0
+		while i < len(edomains) {
+			if edomains[i] == dr.expert { set_head(eheads[i])  hd_rules_ix = erules_ix[i] }
+			i = i + 1
+		}
 	}
 	best := decide()
 	// optional subset restriction: zero out unlisted routes, renormalize
