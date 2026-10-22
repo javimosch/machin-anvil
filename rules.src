@@ -7,6 +7,7 @@
 
 var cur_text = "" // raw state text, set by head_prefill for rule eval
 var cur_scores_json = "{}" // raw {"k":v} scores from the request (score-policy lanes)
+var cur_unchecked = []string{} // declared score inputs absent from the request
 
 type RulePack struct {
 	head Head              // optional fallback head: evaluated when no rule fires
@@ -369,6 +370,26 @@ func rules_decide(ix) (best) {
 			wscore = p.rk_score[j]
 			if wscore <= 0.0 || wscore > 0.999 { wscore = 0.999 }
 			j = len(p.rk_class)
+		}
+		j = j + 1
+	}
+	// unchecked honesty: which declared score inputs were absent this request
+	cur_unchecked = []string{}
+	j = 0
+	while j < len(p.rk_class) {
+		if p.rk_kind[j] == "ge" || p.rk_kind[j] == "le" {
+			colon := index(p.rk_arg[j], ":")
+			if colon > 0 {
+				tok, err := json_get(cur_scores_json, "." + substr(p.rk_arg[j], 0, colon))
+				_ = tok
+				if err != "" {
+					name := substr(p.rk_arg[j], 0, colon)
+					seen := 0
+					k := 0
+					while k < len(cur_unchecked) { if cur_unchecked[k] == name { seen = 1 }  k = k + 1 }
+					if seen == 0 { cur_unchecked = append(cur_unchecked, name) }
+				}
+			}
 		}
 		j = j + 1
 	}

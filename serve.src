@@ -1183,6 +1183,25 @@ func route_state(dr) (state, ctx) {
 	return
 }
 
+// append "unchecked":[...] to a response body when score-policy rules
+// had absent inputs — the openmod-style honesty field.
+func with_unchecked(body) (out) {
+	out = body
+	if len(cur_unchecked) > 0 {
+		uj := ""
+		i := 0
+		while i < len(cur_unchecked) {
+			if i > 0 { uj = uj + "," }
+			uj = uj + "\"" + json_esc(cur_unchecked[i]) + "\""
+			i = i + 1
+		}
+		if len(out) > 0 && substr(out, len(out)-1, len(out)) == "}" {
+			out = substr(out, 0, len(out)-1) + ",\"unchecked\":[" + uj + "]}"
+		}
+	}
+	return
+}
+
 func handle_route(req) (res) {
 	if hd_nr == 0 {
 		res = ok_json("{\"error\":{\"message\":\"no decision head loaded (set ANVIL_HEAD)\",\"type\":\"invalid_request_error\"}}")
@@ -1525,7 +1544,7 @@ func handle_route(req) (res) {
 	if len(call_name) > 0 { body = body + ",\"call\":{\"name\":\"" + json_esc(call_name) + "\",\"arguments\":" + call_args + "}" }
 	if len(content) > 0 { body = body + ",\"content\":\"" + json_esc(content) + "\"" }
 	body = body + ",\"latency_ms\":" + str(lat) + "}"
-	res = ok_json(body)
+	res = ok_json(with_unchecked(body))
 	lj := "{\"ts\":" + str(now_ms()) + ",\"ep\":\"route\",\"state\":\"" + json_esc(state) + "\",\"action\":\"" + action + "\",\"route\":\"" + json_esc(route) + "\",\"conf\":" + str(conf) + ",\"reason\":\"" + reason + "\"" + ",\"domain\":\"" + json_esc(domain) + "\",\"gate_conf\":" + str(gconf) + ",\"expert\":\"" + json_esc(expert) + "\""
 	if set_size >= 0 { lj = lj + ",\"set_size\":" + str(set_size) }
 	lj = lj + ",\"margin\":" + str(margin)
