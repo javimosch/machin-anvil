@@ -1191,6 +1191,8 @@ func handle_route(req) (res) {
 	}
 	t0 := now_ms()
 	dr := parse(req.body, RouteReq{})
+	sj, _ := json_get(req.body, ".scores")
+	cur_scores_json = sj
 	state, ctx := route_state(dr)
 	if len(state) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state or messages required\",\"type\":\"invalid_request_error\"}}")

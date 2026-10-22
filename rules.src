@@ -6,6 +6,7 @@
 // declared score); no hit answers the default_class (usually "none").
 
 var cur_text = "" // raw state text, set by head_prefill for rule eval
+var cur_scores_json = "{}" // raw {"k":v} scores from the request (score-policy lanes)
 
 type RulePack struct {
 	head Head              // optional fallback head: evaluated when no rule fires
@@ -313,6 +314,25 @@ func rule_fires(p, j, lowtext) (hit) {
 		while i < len(runs) { if luhn_ok(runs[i]) == 1 { hit = 1  return }  i = i + 1 }
 	}
 	if kind == "iban" { hit = iban_ok(cur_text) }
+	// numeric score inputs: arg = "input:threshold" (ge/le) or "input" (missing)
+	if kind == "ge" || kind == "le" {
+		colon := index(arg, ":")
+		if colon > 0 {
+			iname := substr(arg, 0, colon)
+			thresh := parse_float(substr(arg, colon+1, len(arg)))
+			tok, err := json_get(cur_scores_json, "." + iname)
+			if err == "" {
+				v := parse_float(tok)
+				if kind == "ge" && v >= thresh { hit = 1 }
+				if kind == "le" && v <= thresh { hit = 1 }
+			}
+		}
+	}
+	if kind == "missing" {
+		tok, err := json_get(cur_scores_json, "." + arg)
+		_ = tok
+		if err == "notfound" || err == "parse" { hit = 1 }
+	}
 	if kind == "domains" {
 		ds := p.domsets[p.rk_dmix[j]]
 		toks := text_domains(lowtext)
