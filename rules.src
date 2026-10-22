@@ -110,8 +110,8 @@ func load_rulepack(path) (ix) {
 
 // unicode lookalikes (literal UTF-8) -> ascii, then spoken substitutions.
 // POSIX ERE has no \xNN — the lookalike chars are literal in the patterns.
-var deob_from = []string{"а","о","е","с","р","х","и","α","ο","[at]","(at)","{at}","[dot]","(dot)","{dot}"," dot "," at ","-at-","-dot-"}
-var deob_to = []string{"a","o","e","c","p","x","u","a","o","@","@","@",".",".",".",". ","@","@","."}
+var deob_from = []string{"а","о","е","с","р","х","и","α","ο","\\[at\\]","\\(at\\)","\\{at\\}","\\[dot\\]","\\(dot\\)","\\{dot\\}","-at-","-dot-"," at "," dot "," @ "," . ","@ ",". "}
+var deob_to = []string{"a","o","e","c","p","x","u","a","o","@","@","@",".",".",".","@",".","@",".","@",".","@","."}
 
 // fold leet only inside tokens that contain a letter — keeps pure digit
 // runs (phones, cards) untouched for the digits/luhn/iban rules.
