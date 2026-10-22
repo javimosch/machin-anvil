@@ -103,6 +103,100 @@ func load_rulepack(path) (ix) {
 	return
 }
 
+// ---- deobfuscation: normalize evasion forms before rule eval ----
+// Lowercase + unicode lookalike fold + at/dot word substitution + leetspeak
+// + spaced-letter join + letter-flood squeeze. Rules see the normalized text;
+// heads still get the raw string (their features were trained on it).
+
+// unicode lookalikes (literal UTF-8) -> ascii, then spoken substitutions.
+// POSIX ERE has no \xNN — the lookalike chars are literal in the patterns.
+var deob_from = []string{"а","о","е","с","р","х","и","α","ο","[at]","(at)","{at}","[dot]","(dot)","{dot}"," dot "," at ","-at-","-dot-"}
+var deob_to = []string{"a","o","e","c","p","x","u","a","o","@","@","@",".",".",".",". ","@","@","."}
+
+// fold leet only inside tokens that contain a letter — keeps pure digit
+// runs (phones, cards) untouched for the digits/luhn/iban rules.
+func fold_leet(t) (out) {
+	out = ""
+	i := 0
+	while i < len(t) {
+		j := i
+		hasalpha := 0
+		while j < len(t) {
+			c := byte_at(bytes(t), j)
+			if (c >= 97 && c <= 122) { hasalpha = 1 }
+			if c == 32 || c == 46 || c == 44 || c == 59 || c == 33 || c == 63 { break }
+			j = j + 1
+		}
+		k := i
+		while k < j {
+			c := byte_at(bytes(t), k)
+			if hasalpha == 1 {
+				if c == 48 { c = 111 }
+				if c == 49 { c = 108 }
+				if c == 51 { c = 101 }
+				if c == 52 { c = 97 }
+				if c == 53 { c = 115 }
+				if c == 55 { c = 116 }
+			}
+			out = out + bytes_str(bytes_sub(bytes(t), k, k+1))
+			k = k + 1
+		}
+		out = out + bytes_str(bytes_sub(bytes(t), j, j+1))
+		i = j + 1
+	}
+	return
+}
+
+// "f r e e" -> "free": join runs of single letters separated by spaces.
+func join_spaced(t) (out) {
+	out = ""
+	i := 0
+	while i < len(t) {
+		c := byte_at(bytes(t), i)
+		// single letter + space + single letter -> skip the space
+		if i+2 < len(t) && byte_at(bytes(t), i+1) == 32 {
+			c2 := byte_at(bytes(t), i+2)
+			if (c >= 97 && c <= 122) && (c2 >= 97 && c2 <= 122) && (i == 0 || byte_at(bytes(t), i-1) == 32) {
+				out = out + bytes_str(bytes_sub(bytes(t), i, i+1))
+				i = i + 2
+				continue
+			}
+		}
+		out = out + bytes_str(bytes_sub(bytes(t), i, i+1))
+		i = i + 1
+	}
+	return
+}
+
+// squeeze 3+ repeated letters to 2 ("loooove" -> "loove")
+func squeeze_floods(t) (out) {
+	out = ""
+	run := 0
+	prev := -1
+	i := 0
+	while i < len(t) {
+		c := byte_at(bytes(t), i)
+		if c == prev { run = run + 1 } else { run = 1 }
+		prev = c
+		if run <= 2 || c < 97 || c > 122 { out = out + bytes_str(bytes_sub(bytes(t), i, i+1)) }
+		i = i + 1
+	}
+	return
+}
+
+func deobfuscate(t) (out) {
+	out = to_lower(t)
+	i := 0
+	while i < len(deob_from) {
+		out = regex_replace(out, deob_from[i], deob_to[i])
+		i = i + 1
+	}
+	out = join_spaced(out)
+	out = fold_leet(out)
+	out = squeeze_floods(out)
+	return
+}
+
 // ---- matchers ----
 
 // digit-run at position >= nmin digits
@@ -245,7 +339,7 @@ func rules_decide(ix) (best) {
 	hd_probs = p.probs
 	i := 0
 	while i < p.nr { poke_f32(hd_probs, i*4, 0.0)  i = i + 1 }
-	low := to_lower(cur_text)
+	low := deobfuscate(cur_text)
 	best = p.default_ix
 	wscore := 0.99
 	j := 0
