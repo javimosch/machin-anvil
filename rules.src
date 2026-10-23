@@ -20,9 +20,9 @@ type RulePack struct {
 	rk_kind []string
 	rk_arg []string
 	rk_score []float
-	domlist []string
-	wordlist []string
-	phraselist []string
+	listpool []string
+	rk_lo []int
+	rk_hi []int
 	wf_names []string
 	wf_minconf []float
 	rk_dmix []int
@@ -97,51 +97,26 @@ func load_rulepack(path) (ix) {
 		p.rk_score = append(p.rk_score, r.score)
 		dmix := -1
 		arg := r.arg
-		if r.kind == "domains" {
+		if r.kind == "domains" || r.kind == "words" || r.kind == "phrases" {
 			dp := arg
 			if len(base) > 0 && substr(arg, 0, 1) != "/" { dp = base + arg }
-			// sorted []string (file order) + binary search — a map dropped
-			// entries at 200k+ scale (sparse silent misses on real lists).
-			ds := []string{}
+			// per-rule segment in one shared pool: a pack-global list made
+			// composite packs mislabel (severity-ordered rules claimed each
+			// other's matches). Segments stay sorted for binsearch kinds.
+			seg := []string{}
 			lines := split(read_file(dp), "\n")
 			k := 0
 			while k < len(lines) {
 				d := trim(to_lower(lines[k]))
-				if len(d) > 0 && substr(d, 0, 1) != "#" { ds = append(ds, d) }
+				if len(d) > 0 && substr(d, 0, 1) != "#" { seg = append(seg, d) }
 				k = k + 1
 			}
+			seg = sort(seg)
+			dmix = len(p.rk_lo)
+			p.rk_lo = append(p.rk_lo, len(p.listpool))
 			mi := 0
-			while mi < len(ds) { p.domlist = append(p.domlist, ds[mi])  mi = mi + 1 }
-			p.domlist = sort(p.domlist)
-			dmix = 0
-		}
-		if r.kind == "words" {
-			wp := arg
-			if len(base) > 0 && substr(arg, 0, 1) != "/" { wp = base + arg }
-			ws := []string{}
-			lines := split(read_file(wp), "\n")
-			k := 0
-			while k < len(lines) {
-				w := trim(to_lower(lines[k]))
-				if len(w) > 0 && substr(w, 0, 1) != "#" { ws = append(ws, w) }
-				k = k + 1
-			}
-			mi := 0
-			while mi < len(ws) { p.wordlist = append(p.wordlist, ws[mi])  mi = mi + 1 }
-			p.wordlist = sort(p.wordlist)
-			dmix = 0
-		}
-		if r.kind == "phrases" {
-			pp := arg
-			if len(base) > 0 && substr(arg, 0, 1) != "/" { pp = base + arg }
-			lines := split(read_file(pp), "\n")
-			k := 0
-			while k < len(lines) {
-				ph := trim(to_lower(lines[k]))
-				if len(ph) > 0 && substr(ph, 0, 1) != "#" { p.phraselist = append(p.phraselist, ph) }
-				k = k + 1
-			}
-			dmix = 0
+			while mi < len(seg) { p.listpool = append(p.listpool, seg[mi])  mi = mi + 1 }
+			p.rk_hi = append(p.rk_hi, len(p.listpool))
 			arg = ""
 		}
 		p.rk_dmix = append(p.rk_dmix, dmix)
@@ -249,10 +224,9 @@ func deobfuscate(t) (out) {
 }
 
 // binary search in a sorted []string — domains lists keep file order
-func in_sorted(list, target) (found) {
+func in_sorted(list, lo, hi, target) (found) {
 	found = 0
-	lo := 0
-	hi := len(list) - 1
+	hi = hi - 1
 	while lo <= hi {
 		mid := lo + (hi - lo) / 2
 		m := list[mid]
@@ -420,9 +394,9 @@ func rule_fires(p, j, lowtext) (hit) {
 	if kind == "phrases" {
 		pad := " " + lowtext + " "
 		pad2 := " " + to_lower(cur_text) + " "
-		i := 0
-		while i < len(p.phraselist) {
-			ph := " " + p.phraselist[i] + " "
+		i := p.rk_lo[p.rk_dmix[j]]
+		while i < p.rk_hi[p.rk_dmix[j]] {
+			ph := " " + p.listpool[i] + " "
 			if index(pad, ph) >= 0 || index(pad2, ph) >= 0 { hit = 1  return }
 			i = i + 1
 		}
@@ -434,12 +408,13 @@ func rule_fires(p, j, lowtext) (hit) {
 		while mi < len(wt2) { wt = append(wt, wt2[mi])  mi = mi + 1 }
 		i := 0
 		while i < len(wt) {
-			if in_sorted(p.wordlist, wt[i]) == 1 { hit = 1  return }
+			if in_sorted(p.listpool, p.rk_lo[p.rk_dmix[j]], p.rk_hi[p.rk_dmix[j]], wt[i]) == 1 { hit = 1  return }
 			i = i + 1
 		}
 	}
 	if kind == "domains" {
-		ds := p.domlist
+		dlo := p.rk_lo[p.rk_dmix[j]]
+		dhi := p.rk_hi[p.rk_dmix[j]]
 		// check deobfuscated text AND raw-lowercase text: the leet fold
 		// catches "ph1shing" -> "phishing" evasion, but it also rewrites
 		// digit+letter domain tokens ("31job" -> "eijob") — the raw pass
@@ -453,7 +428,7 @@ func rule_fires(p, j, lowtext) (hit) {
 			d := toks[i]
 			scanning := 1
 			while scanning == 1 {
-				if in_sorted(ds, d) == 1 { hit = 1  return }
+				if in_sorted(p.listpool, dlo, dhi, d) == 1 { hit = 1  return }
 				di := index(d, ".")
 				if di < 0 { scanning = 0 } else { d = substr(d, di+1, len(d)) }
 			}
