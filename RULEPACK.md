@@ -40,6 +40,7 @@ List paths inside a pack resolve relative to the pack file's directory.
 | `regex` | ERE pattern | `regex_match` on the normalized text |
 | `contains` | substring | literal `index() >= 0` |
 | `words` | list file | word tokens `[a-z0-9']` → sorted-list membership |
+| `phrases` | list file | each line as space-padded substring on normalized+raw text (multiword terms) |
 | `digits` | `N` | a run of ≥9 digit chars exists |
 | `luhn` | — | Luhn check on merged digit groups (`4111 1111 1111 1111` works) |
 | `iban` | — | IBAN mod-97 on extracted candidates |
@@ -53,9 +54,11 @@ List paths inside a pack resolve relative to the pack file's directory.
 Before rule eval the text passes `deobfuscate()`: lowercase, unicode-lookalike
 fold, `[at]`/` at `/` dot `-forms→`@`/`.`, leetspeak (`0→o 1→i 3→e 4→a 5→s
 7→t`) inside alpha tokens, spaced-letter join, letter-flood squeeze. Digit-only
-tokens are preserved, so `luhn`/`iban`/`digits` stay honest. `domains` and
-`words` check BOTH deobfuscated and raw text (clean listed tokens stay
-findable even when the fold would rewrite them).
+tokens are preserved, so `luhn`/`iban`/`digits` stay honest. `domains`, `words`,
+`phrases` and `regex` check BOTH deobfuscated and raw-lowercased text —
+clean listed tokens and digit+letter IDs (crypto addresses) stay findable
+even when the fold would rewrite them, while `f u c k`/`s.h.1.t` evasion
+forms still resolve via the deob pass.
 
 ## Score-policy lanes
 
@@ -83,7 +86,9 @@ Rules verdicts ride the same pipeline: `ANVIL_EXPERT_MINCONF`,
 
 - First rule wins — order from most-specific to most-general.
 - Keep patterns anchored: `(verify.{0,10}account)` beats `verify` alone.
-- List files: one entry per line, `#` comments, loaded + sorted at boot —
-  hundred-thousand-entry blocklists run at ~0ms.
+- List files: one entry per line, `#` comments; each list-kind rule owns a
+  `[lo,hi)` segment of a shared pool — per-rule lists, not pack-global.
+- `domains`/`words` lists are sorted + binary-searched (200k+ entries ~0ms);
+  `phrases` scans linearly (keep to a few thousand lines).
 - Test evasion explicitly: the pack should catch `s.p.a.m`, `sp4m`, `[at]`
   forms — probe those, not just clean text.
