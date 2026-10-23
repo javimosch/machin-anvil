@@ -22,6 +22,7 @@ type RulePack struct {
 	rk_score []float
 	domlist []string
 	wordlist []string
+	phraselist []string
 	wf_names []string
 	wf_minconf []float
 	rk_dmix []int
@@ -128,6 +129,18 @@ func load_rulepack(path) (ix) {
 			mi := 0
 			while mi < len(ws) { p.wordlist = append(p.wordlist, ws[mi])  mi = mi + 1 }
 			p.wordlist = sort(p.wordlist)
+			dmix = 0
+		}
+		if r.kind == "phrases" {
+			pp := arg
+			if len(base) > 0 && substr(arg, 0, 1) != "/" { pp = base + arg }
+			lines := split(read_file(pp), "\n")
+			k := 0
+			while k < len(lines) {
+				ph := trim(to_lower(lines[k]))
+				if len(ph) > 0 && substr(ph, 0, 1) != "#" { p.phraselist = append(p.phraselist, ph) }
+				k = k + 1
+			}
 			dmix = 0
 			arg = ""
 		}
@@ -403,6 +416,16 @@ func rule_fires(p, j, lowtext) (hit) {
 		tok, err := json_get(cur_scores_json, "." + arg)
 		_ = tok
 		if err == "notfound" || err == "parse" { hit = 1 }
+	}
+	if kind == "phrases" {
+		pad := " " + lowtext + " "
+		pad2 := " " + to_lower(cur_text) + " "
+		i := 0
+		while i < len(p.phraselist) {
+			ph := " " + p.phraselist[i] + " "
+			if index(pad, ph) >= 0 || index(pad2, ph) >= 0 { hit = 1  return }
+			i = i + 1
+		}
 	}
 	if kind == "words" {
 		wt := text_words(lowtext)
