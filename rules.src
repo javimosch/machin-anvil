@@ -20,7 +20,7 @@ type RulePack struct {
 	rk_kind []string
 	rk_arg []string
 	rk_score []float
-	domsets []map[string]int
+	domlist []string
 	rk_dmix []int
 }
 
@@ -85,16 +85,20 @@ func load_rulepack(path) (ix) {
 		if r.kind == "domains" {
 			dp := arg
 			if len(base) > 0 && substr(arg, 0, 1) != "/" { dp = base + arg }
-			ds := make(map[string]int)
+			// sorted []string (file order) + binary search — a map dropped
+			// entries at 200k+ scale (sparse silent misses on real lists).
+			ds := []string{}
 			lines := split(read_file(dp), "\n")
 			k := 0
 			while k < len(lines) {
 				d := trim(to_lower(lines[k]))
-				if len(d) > 0 && substr(d, 0, 1) != "#" { ds[d] = 1 }
+				if len(d) > 0 && substr(d, 0, 1) != "#" { ds = append(ds, d) }
 				k = k + 1
 			}
-			p.domsets = append(p.domsets, ds)
-			dmix = len(p.domsets) - 1
+			mi := 0
+			while mi < len(ds) { p.domlist = append(p.domlist, ds[mi])  mi = mi + 1 }
+			p.domlist = sort(p.domlist)
+			dmix = 0
 			arg = ""
 		}
 		p.rk_dmix = append(p.rk_dmix, dmix)
@@ -198,6 +202,20 @@ func deobfuscate(t) (out) {
 	out = join_spaced(out)
 	out = fold_leet(out)
 	out = squeeze_floods(out)
+	return
+}
+
+// binary search in a sorted []string — domains lists keep file order
+func in_sorted(list, target) (found) {
+	found = 0
+	lo := 0
+	hi := len(list) - 1
+	while lo <= hi {
+		mid := lo + (hi - lo) / 2
+		m := list[mid]
+		if m == target { found = 1  return }
+		if m < target { lo = mid + 1 } else { hi = mid - 1 }
+	}
 	return
 }
 
@@ -337,14 +355,21 @@ func rule_fires(p, j, lowtext) (hit) {
 		if err == "notfound" || err == "parse" { hit = 1 }
 	}
 	if kind == "domains" {
-		ds := p.domsets[p.rk_dmix[j]]
+		ds := p.domlist
+		// check deobfuscated text AND raw-lowercase text: the leet fold
+		// catches "ph1shing" -> "phishing" evasion, but it also rewrites
+		// digit+letter domain tokens ("31job" -> "eijob") — the raw pass
+		// keeps already-clean domains findable.
 		toks := text_domains(lowtext)
+		t2 := text_domains(to_lower(cur_text))
+		mi := 0
+		while mi < len(t2) { toks = append(toks, t2[mi])  mi = mi + 1 }
 		i := 0
 		while i < len(toks) {
 			d := toks[i]
 			scanning := 1
 			while scanning == 1 {
-				if has(ds, d) { hit = 1  return }
+				if in_sorted(ds, d) == 1 { hit = 1  return }
 				di := index(d, ".")
 				if di < 0 { scanning = 0 } else { d = substr(d, di+1, len(d)) }
 			}
