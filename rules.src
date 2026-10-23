@@ -21,6 +21,7 @@ type RulePack struct {
 	rk_arg []string
 	rk_score []float
 	domlist []string
+	wordlist []string
 	rk_dmix []int
 }
 
@@ -98,6 +99,22 @@ func load_rulepack(path) (ix) {
 			mi := 0
 			while mi < len(ds) { p.domlist = append(p.domlist, ds[mi])  mi = mi + 1 }
 			p.domlist = sort(p.domlist)
+			dmix = 0
+		}
+		if r.kind == "words" {
+			wp := arg
+			if len(base) > 0 && substr(arg, 0, 1) != "/" { wp = base + arg }
+			ws := []string{}
+			lines := split(read_file(wp), "\n")
+			k := 0
+			while k < len(lines) {
+				w := trim(to_lower(lines[k]))
+				if len(w) > 0 && substr(w, 0, 1) != "#" { ws = append(ws, w) }
+				k = k + 1
+			}
+			mi := 0
+			while mi < len(ws) { p.wordlist = append(p.wordlist, ws[mi])  mi = mi + 1 }
+			p.wordlist = sort(p.wordlist)
 			dmix = 0
 			arg = ""
 		}
@@ -215,6 +232,23 @@ func in_sorted(list, target) (found) {
 		m := list[mid]
 		if m == target { found = 1  return }
 		if m < target { lo = mid + 1 } else { hi = mid - 1 }
+	}
+	return
+}
+
+// word tokens: [a-z0-9']+ runs (for wordlist membership checks)
+func text_words(t) (out) {
+	out = []string{}
+	cur := ""
+	i := 0
+	while i <= len(t) {
+		c := ""
+		if i < len(t) { c = substr(t, i, i+1) }
+		if (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "'" { cur = cur + c } else {
+			if len(cur) > 0 { out = append(out, cur) }
+			cur = ""
+		}
+		i = i + 1
 	}
 	return
 }
@@ -353,6 +387,17 @@ func rule_fires(p, j, lowtext) (hit) {
 		tok, err := json_get(cur_scores_json, "." + arg)
 		_ = tok
 		if err == "notfound" || err == "parse" { hit = 1 }
+	}
+	if kind == "words" {
+		wt := text_words(lowtext)
+		wt2 := text_words(to_lower(cur_text))
+		mi := 0
+		while mi < len(wt2) { wt = append(wt, wt2[mi])  mi = mi + 1 }
+		i := 0
+		while i < len(wt) {
+			if in_sorted(p.wordlist, wt[i]) == 1 { hit = 1  return }
+			i = i + 1
+		}
 	}
 	if kind == "domains" {
 		ds := p.domlist
