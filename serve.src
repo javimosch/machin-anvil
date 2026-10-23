@@ -1167,6 +1167,7 @@ type RouteReq struct {
 	messages []ChatMsg
 	execute bool
 	expert string
+	workflow string
 	min_conf float
 	min_gate_conf float
 	max_tokens int
@@ -1393,6 +1394,14 @@ func handle_route(req) (res) {
 		}
 	}
 	// On a conformal lane the calibrated set replaces the hand-tuned floor.
+	if action != "delegate" && len(dr.workflow) > 0 && hd_rules_ix >= 0 {
+		wpa := rulepacks[hd_rules_ix]
+		wk := 0
+		while wk < len(wpa.wf_names) {
+			if wpa.wf_names[wk] == dr.workflow { minconf = wpa.wf_minconf[wk] }
+			wk = wk + 1
+		}
+	}
 	if action != "delegate" && qhat <= 0.0 && conf < minconf { action = "delegate"  reason = "low_confidence" }
 	if action != "delegate" && route == "escalate" { action = "delegate"  reason = "route_escalate" }
 	// 'oos' is an abstention-path class like escalate — a confident singleton

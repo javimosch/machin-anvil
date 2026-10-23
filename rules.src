@@ -22,6 +22,8 @@ type RulePack struct {
 	rk_score []float
 	domlist []string
 	wordlist []string
+	wf_names []string
+	wf_minconf []float
 	rk_dmix []int
 }
 
@@ -40,11 +42,16 @@ type rp_rule struct {
 	arg string
 	score float
 }
+type rp_wf struct {
+	name string
+	min_conf float
+}
 type rp_file struct {
 	classes []string
 	default_class string
 	head string            // optional .head path (relative to this file): fallback scorer
 	rules []rp_rule
+	workflows []rp_wf
 }
 
 // map each rule kind=domains arg (file path, relative to the rules file)
@@ -55,6 +62,12 @@ func load_rulepack(path) (ix) {
 	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
 	p := RulePack{}
 	p.names = f.classes
+	wi := 0
+	while wi < len(f.workflows) {
+		p.wf_names = append(p.wf_names, f.workflows[wi].name)
+		p.wf_minconf = append(p.wf_minconf, f.workflows[wi].min_conf)
+		wi = wi + 1
+	}
 	p.nr = len(f.classes)
 	p.probs = alloc(p.nr * 4)
 	p.default_ix = 0
