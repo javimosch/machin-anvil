@@ -361,6 +361,9 @@ func rule_fires(p, j, lowtext) (hit) {
 	kind := p.rk_kind[j]
 	arg := p.rk_arg[j]
 	if kind == "regex" { if regex_match(lowtext, arg) { hit = 1 } }
+	// raw pass too: leet fold can rewrite digit+letter tokens (crypto
+	// addresses, IDs) that the pattern was written to match
+	if kind == "regex" && hit == 0 { if regex_match(to_lower(cur_text), arg) { hit = 1 } }
 	if kind == "contains" { if index(lowtext, arg) >= 0 { hit = 1 } }
 	if kind == "digits" { hit = has_digit_run(lowtext, 9) }
 	if kind == "luhn" {
