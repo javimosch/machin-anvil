@@ -1032,6 +1032,8 @@ func handle_noul(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	sj, _ := json_get(req.body, ".scores")
+	cur_scores_json = sj
 	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
@@ -1064,6 +1066,8 @@ func handle_score(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	sj, _ := json_get(req.body, ".scores")
+	cur_scores_json = sj
 	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
@@ -1098,6 +1102,8 @@ func handle_decide(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	sj, _ := json_get(req.body, ".scores")
+	cur_scores_json = sj
 	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
@@ -1623,6 +1629,8 @@ func handle_assess(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
+	sj, _ := json_get(req.body, ".scores")
+	cur_scores_json = sj
 	if head_prefill(dr.state, dr.context) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
