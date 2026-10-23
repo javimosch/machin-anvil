@@ -904,6 +904,8 @@ func log_decision(line) {
 // lock — score the head, then mu_rel <- 1.
 func head_prefill(state, ctx) (ok) {
 	cur_text = state
+	cur_matched = ""
+	cur_unchecked = []string{}
 	lk := <-mu_acq
 	lk = lk
 	ok = head_prefill_locked(state, ctx)
@@ -915,6 +917,8 @@ func head_prefill(state, ctx) (ok) {
 // trunk forward entirely — a deterministic pack has nothing to embed.
 func rules_prefill(state) (ok) {
 	cur_text = state
+	cur_matched = ""
+	cur_unchecked = []string{}
 	lk := <-mu_acq
 	lk = lk
 	ok = 1
