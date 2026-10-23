@@ -133,15 +133,16 @@ func fold_leet(t) (out) {
 		k := i
 		while k < j {
 			c := byte_at(bytes(t), k)
+			ch := bytes_str(bytes_sub(bytes(t), k, k+1))
 			if hasalpha == 1 {
-				if c == 48 { c = 111 }
-				if c == 49 { c = 108 }
-				if c == 51 { c = 101 }
-				if c == 52 { c = 97 }
-				if c == 53 { c = 115 }
-				if c == 55 { c = 116 }
+				if c == 48 { ch = "o" }
+				if c == 49 { ch = "i" }
+				if c == 51 { ch = "e" }
+				if c == 52 { ch = "a" }
+				if c == 53 { ch = "s" }
+				if c == 55 { ch = "t" }
 			}
-			out = out + bytes_str(bytes_sub(bytes(t), k, k+1))
+			out = out + ch
 			k = k + 1
 		}
 		out = out + bytes_str(bytes_sub(bytes(t), j, j+1))
