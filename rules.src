@@ -57,11 +57,21 @@ type rp_file struct {
 
 // map each rule kind=domains arg (file path, relative to the rules file)
 // to a loaded domain set; rules reference it via rk_dmix.
-func load_rulepack(path) (ix) {
+func reload_rulepack(path, ix) {
+	// re-read a pack into the same slot — /v1/admin/reload path; the whole
+	// pack (rules + listpool) is rebuilt and swapped, old lists drop with it.
+	p := read_rulepack(path)
+	if ix >= 0 && ix < len(rulepacks) { rulepacks[ix] = p }
+}
+
+func read_rulepack(path) (p) {
 	b := read_file(path)
 	f := parse(b, rp_file{})
 	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
-	p := RulePack{}
+	p = RulePack{}
+	b := read_file(path)
+	f := parse(b, rp_file{})
+	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
 	p.names = f.classes
 	wi := 0
 	while wi < len(f.workflows) {
@@ -123,6 +133,11 @@ func load_rulepack(path) (ix) {
 		p.rk_arg = append(p.rk_arg, arg)
 		i = i + 1
 	}
+	return
+}
+
+func load_rulepack(path) (ix) {
+	p := read_rulepack(path)
 	rulepacks = append(rulepacks, p)
 	ix = len(rulepacks) - 1
 	return

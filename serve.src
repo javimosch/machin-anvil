@@ -775,7 +775,8 @@ func zero_head() (h) {
 var ghead = zero_head()
 var edomains = []string{}
 var eheads = []Head{}      // parallel to edomains
-var erules_ix = []int{}    // parallel to edomains: >=0 rulepack index, -1 head lane
+var erules_ix = []int{}
+var erules_path = []string{} // parallel to edomains: pack path for rules lanes    // parallel to edomains: >=0 rulepack index, -1 head lane
 var emin_names = []string{} // ANVIL_EXPERT_MINCONF="mairie:0.30,..." — per-lane
 var emin_vals = []float{}   //   confidence floor; overrides the global floor
 var sh_domains = []string{} // ANVIL_SHADOW="dom:file.head,..." — per-lane
@@ -2176,6 +2177,27 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/models" { res = handle_models()  return }
 	if req.method == "POST" && req.path == "/v1/chat/completions" { met_ep(0)  res = handle_chat(req)  return }
 	if req.method == "POST" && req.path == "/v1/decide" { met_ep(1)  res = handle_decide(req)  return }
+	if req.path == "/v1/admin/reload" {
+		if auth_ok(req) == 0 && req.remote != "127.0.0.1" && req.remote != "::1" {
+			res = ok_json("{\"error\":{\"message\":\"reload is loopback-only or requires ANVIL_KEYS\",\"type\":\"forbidden\"}}")
+			res.status = "403 Forbidden"
+			return
+		}
+		rl := ""
+		rn := 0
+		i := 0
+		while i < len(erules_ix) {
+			if erules_ix[i] >= 0 {
+				reload_rulepack(erules_path[i], erules_ix[i])
+				if rn > 0 { rl = rl + "," }
+				rl = rl + "\"" + edomains[i] + "\""
+				rn = rn + 1
+			}
+			i = i + 1
+		}
+		res = ok_json("{\"ok\":true,\"reloaded\":[" + rl + "]}")
+		return
+	}
 	if req.method == "POST" && req.path == "/v1/route" { res = handle_route(req)  return }
 	if req.method == "POST" && req.path == "/v1/assess" { met_ep(2)  res = handle_assess(req)  return }
 	if req.method == "POST" && req.path == "/v1/noul" { met_ep(3)  res = handle_noul(req)  return }
@@ -2285,9 +2307,11 @@ func main() {
 				if ends_with(ef, ".rules.json") == 1 {
 					eheads = append(eheads, Head{})
 					erules_ix = append(erules_ix, load_rulepack(ef))
+					erules_path = append(erules_path, ef)
 				} else {
 					eheads = append(eheads, read_head(ef))
 					erules_ix = append(erules_ix, -1)
+					erules_path = append(erules_path, "")
 				}
 			}
 			i = i + 1
