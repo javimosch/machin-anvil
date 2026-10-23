@@ -911,6 +911,16 @@ func head_prefill(state, ctx) (ok) {
 	return
 }
 
+// rules-only lanes: hold the same lock for the decision window but skip the
+// trunk forward entirely — a deterministic pack has nothing to embed.
+func rules_prefill(state) (ok) {
+	cur_text = state
+	lk := <-mu_acq
+	lk = lk
+	ok = 1
+	return
+}
+
 // head_prefill without lock acquisition — for callers already holding
 // mu_acq (e.g. /v1/systemone's per-candidate scoring loop).
 func head_prefill_locked(state, ctx) (ok) {
@@ -1225,7 +1235,23 @@ func handle_route(req) (res) {
 	emc := parse_float(env("ANVIL_ROUTE_MINCONF"))
 	if emc > 0.0 { minconf = emc }
 	if dr.min_conf > 0.0 { minconf = dr.min_conf }
-	if head_prefill(state, ctx) == 0 {
+	// a pinned rules lane with no head fallback doesn't need trunk features —
+	// deterministic rules answer without a forward pass.
+	skip_forward := 0
+	if len(dr.expert) > 0 {
+		i := 0
+		while i < len(edomains) {
+			if edomains[i] == dr.expert && i < len(erules_ix) && erules_ix[i] >= 0 && rulepacks[erules_ix[i]].head.nr == 0 { skip_forward = 1 }
+			i = i + 1
+		}
+	}
+	if skip_forward == 1 {
+		if rules_prefill(state) == 0 {
+			res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
+			res.status = "400 Bad Request"
+			return
+		}
+	} else if head_prefill(state, ctx) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state exceeds model context length\",\"type\":\"invalid_request_error\"}}")
 		res.status = "400 Bad Request"
 		return
