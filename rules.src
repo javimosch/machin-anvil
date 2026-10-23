@@ -8,6 +8,7 @@
 var cur_text = "" // raw state text, set by head_prefill for rule eval
 var cur_scores_json = "{}" // raw {"k":v} scores from the request (score-policy lanes)
 var cur_unchecked = []string{} // declared score inputs absent from the request
+var cur_matched = "" // "class:kind" of the rule that produced the verdict
 
 type RulePack struct {
 	head Head              // optional fallback head: evaluated when no rule fires
@@ -112,7 +113,7 @@ func load_rulepack(path) (ix) {
 
 // unicode lookalikes (literal UTF-8) -> ascii, then spoken substitutions.
 // POSIX ERE has no \xNN — the lookalike chars are literal in the patterns.
-var deob_from = []string{"а","о","е","с","р","х","и","α","ο","\\[at\\]","\\(at\\)","\\{at\\}","\\[dot\\]","\\(dot\\)","\\{dot\\}","-at-","-dot-"," at "," dot "," @ "," . ","@ ",". "}
+var deob_from = []string{"а","о","е","с","р","х","и","α","ο","[[]at[]]","[(]at[]]","{at}","[[]dot[]]","[(]dot[]]","{dot}","-at-","-dot-"," at "," dot "," @ "," [.] ","@ ","[.] "}
 var deob_to = []string{"a","o","e","c","p","x","u","a","o","@","@","@",".",".",".","@",".","@",".","@",".","@","."}
 
 // fold leet only inside tokens that contain a letter — keeps pure digit
@@ -363,11 +364,14 @@ func rules_decide(ix) (best) {
 	low := deobfuscate(cur_text)
 	best = p.default_ix
 	wscore := 0.99
+	fired := -1
 	j := 0
+	cur_matched = ""
 	while j < len(p.rk_class) {
 		if rule_fires(p, j, low) == 1 {
 			best = p.rk_class[j]
 			wscore = p.rk_score[j]
+			fired = j
 			if wscore <= 0.0 || wscore > 0.999 { wscore = 0.999 }
 			j = len(p.rk_class)
 		}
@@ -393,6 +397,7 @@ func rules_decide(ix) (best) {
 		}
 		j = j + 1
 	}
+	if fired >= 0 { cur_matched = p.names[best] + ":" + p.rk_kind[fired] }
 	if best == p.default_ix && p.head.nr > 0 {
 		// rules floor missed -> fall through to the lane's head
 		set_head(p.head)

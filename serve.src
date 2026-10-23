@@ -1187,6 +1187,9 @@ func route_state(dr) (state, ctx) {
 // had absent inputs — the openmod-style honesty field.
 func with_unchecked(body) (out) {
 	out = body
+	if len(cur_matched) > 0 && len(out) > 0 && substr(out, len(out)-1, len(out)) == "}" {
+		out = substr(out, 0, len(out)-1) + ",\"matched_rule\":\"" + json_esc(cur_matched) + "\"}"
+	}
 	if len(cur_unchecked) > 0 {
 		uj := ""
 		i := 0
