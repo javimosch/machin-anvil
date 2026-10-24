@@ -1315,6 +1315,83 @@ func route_state(dr) (state, ctx) {
 
 // append "unchecked":[...] to a response body when score-policy rules
 // had absent inputs — the openmod-style honesty field.
+// Perspective-compat: POST /v1/comments:analyze {comment:{text},requestedAttributes:{}}
+// -> Perspective-shaped attributeScores. mod_text's 29-class composite supplies
+// the verdicts; each Perspective attribute maps to a class set (max over set).
+// matched_rule rides along in the response as the evidence Perspective lacks.
+func persp_attr(name) (v) {
+	v = 0.0
+	i := 0
+	while i < len(hd_names) {
+		n := hd_names[i]
+		hit := 0
+		if name == "TOXICITY" { if n == "hate" || n == "harassment" || n == "profane" || n == "violent" || n == "extremist" { hit = 1 } }
+		if name == "SEVERE_TOXICITY" { if n == "hate" || n == "violent" || n == "extremist" || n == "self_harm" { hit = 1 } }
+		if name == "INSULT" { if n == "harassment" || n == "profane" { hit = 1 } }
+		if name == "THREAT" { if n == "violent" || n == "weapons" || n == "extremist" { hit = 1 } }
+		if name == "IDENTITY_ATTACK" { if n == "hate" { hit = 1 } }
+		if name == "PROFANITY" { if n == "profane" { hit = 1 } }
+		if name == "SEXUALLY_EXPLICIT" { if n == "nsfw" { hit = 1 } }
+		if name == "SPAM" { if n == "spam" { hit = 1 } }
+		if hit == 1 {
+			p := peek_f32(hd_probs, i*4)
+			if p > v { v = p }
+		}
+		i = i + 1
+	}
+	return
+}
+
+func handle_perspective(req) (res) {
+	lk := <-mu_acq
+	body, _ := json_get(req.body, ".comment.text")
+	if len(body) == 0 { body, _ = json_get(req.body, ".comment") }
+	body = unq(body)
+	if len(body) == 0 {
+		mu_rel <- 1
+		res = ok_json("{\"error\":{\"message\":\"comment.text required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	mx := -1
+	i := 0
+	while i < len(edomains) {
+		if edomains[i] == "mod_text" { mx = i }
+		i = i + 1
+	}
+	if mx < 0 {
+		mu_rel <- 1
+		res = ok_json("{\"error\":{\"message\":\"mod_text composite not configured\",\"type\":\"invalid_request_error\"}}")
+		return
+	}
+	set_head(eheads[mx])
+	hd_rules_ix = erules_ix[mx]
+	cur_text = body
+	// pure-rules lane: no head_prefill — rules_decide works on cur_text alone
+	// (head_prefill on the empty Head{} crashed the worker).
+	best := decide()
+	attrs := []string{}
+	attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
+	attrs = append(attrs,"INSULT")  attrs = append(attrs,"THREAT")
+	attrs = append(attrs,"IDENTITY_ATTACK")  attrs = append(attrs,"PROFANITY")
+	attrs = append(attrs,"SEXUALLY_EXPLICIT")  attrs = append(attrs,"SPAM")
+	attrs = append(attrs,"FLIRTATION")
+	aj := ""
+	i = 0
+	while i < len(attrs) {
+		n := attrs[i]
+		v := 0.0
+		if n != "FLIRTATION" { v = persp_attr(n) }
+		if i > 0 { aj = aj + "," }
+		aj = aj + "\"" + n + "\":{\"summaryScore\":{\"value\":" + str(v) + ",\"type\":\"PROBABILITY\"}}"
+		i = i + 1
+	}
+	mu_rel <- 1
+	b := "{\"attributeScores\":{" + aj + "}}"
+	res = ok_json(b)
+	return
+}
+
 func with_unchecked(body) (out) {
 	out = body
 	if len(cur_matched) > 0 && len(out) > 0 && substr(out, len(out)-1, len(out)) == "}" {
@@ -2279,6 +2356,8 @@ func api_route(req) (res) {
 	if req.method == "GET" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
 	// /v1/stats is public by design — aggregates only, no request text
 	if req.method == "GET" && req.path == "/v1/stats" { res = handle_stats()  return }
+	// Perspective API drop-in — key-gated like the rest of /v1/*
+	if req.method == "POST" && req.path == "/v1/comments:analyze" { res = handle_perspective(req)  return }
 	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
 		res.status = "401 Unauthorized"
