@@ -1260,7 +1260,7 @@ func handle_decide(req) (res) {
 	}
 	body := "{\"object\":\"decision\",\"model\":\"" + model_id + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"confidence\":" + str(peek_f32(hd_probs, best*4)) + ",\"probabilities\":{" + probs + "}}"
 	mu_rel <- 1
-	res = ok_json(body)
+	res = ok_json(with_unchecked(body))
 	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"decide\",\"state\":\"" + json_esc(dr.state) + "\",\"choice\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
 	return
 }
