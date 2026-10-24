@@ -603,6 +603,80 @@ func handle_ready() (res) {
 	return
 }
 
+// GET /v1/stats — aggregate decision stats from ANVIL_LOG. Aggregates only:
+// counts, rates, confidences — never the raw request text. Public-safe by design.
+func handle_stats() (res) {
+	names := []string{}
+	cnt := make(map[string]int)
+	csum := make(map[string]float)
+	del := make(map[string]int)
+	recent := make(map[string]int)
+	act := make(map[string]int)
+	rt := make(map[string]int)
+	now := now_ms()
+	total := 0
+	lines := split(read_file(decide_log), "\n")
+	i := 0
+	while i < len(lines) {
+		ln := lines[i]
+		if len(ln) < 10 { i = i + 1  continue }
+		lane, _ := json_get(ln, ".expert")
+		if len(lane) == 0 { lane, _ = json_get(ln, ".domain") }
+		if len(lane) == 0 { lane, _ = json_get(ln, ".ep") }
+		lane = unq(lane)
+		if len(lane) == 0 { i = i + 1  continue }
+		if cnt[lane] == 0 { names = append(names, lane) }
+		cnt[lane] = cnt[lane] + 1
+		total = total + 1
+		a, _ := json_get(ln, ".action")
+		a = unq(a)
+		act[lane + "|" + a] = act[lane + "|" + a] + 1
+		if a == "delegate" { del[lane] = del[lane] + 1 }
+		c, _ := json_get(ln, ".conf")
+		cf := parse_float(c)
+		if cf > 0.0 { csum[lane] = csum[lane] + cf }
+		r, _ := json_get(ln, ".route")
+		r = unq(r)
+		if len(r) > 0 { rt[lane + "|" + r] = rt[lane + "|" + r] + 1 }
+		ts, _ := json_get(ln, ".ts")
+		tv := parse_float(ts)
+		if tv > 0 && now - int(tv) < 86400000 { recent[lane] = recent[lane] + 1 }
+		i = i + 1
+	}
+	b := "{\"generated_ms\":" + str(now) + ",\"total_decisions\":" + str(total) + ",\"lanes\":{"
+	j := 0
+	while j < len(names) {
+		n := names[j]
+		if j > 0 { b = b + "," }
+		b = b + "\"" + json_esc(n) + "\":{\"decisions\":" + str(cnt[n])
+		b = b + ",\"last24h\":" + str(recent[n])
+		if cnt[n] > 0 {
+			b = b + ",\"delegate_rate\":" + str(float(del[n]) / float(cnt[n]))
+			b = b + ",\"avg_conf\":" + str(csum[n] / float(cnt[n]))
+		}
+		b = b + ",\"top_routes\":{"
+		kk := keys(rt)
+		first := 1
+		k := 0
+		while k < len(kk) {
+			key := kk[k]
+			if index(key, n + "|") == 0 {
+				rn := substr(key, len(n) + 1, len(key))
+				if first == 0 { b = b + "," }
+				b = b + "\"" + json_esc(rn) + "\":" + str(rt[key])
+				first = 0
+			}
+			k = k + 1
+		}
+		b = b + "}}"
+		j = j + 1
+	}
+	res = ok_json(b + "}}")
+	res = with_header(res, "Access-Control-Allow-Origin", "*")
+	res = with_header(res, "Cache-Control", "no-store")
+	return
+}
+
 func handle_lanes() (res) {
 	// Per-lane readiness detail: names, class counts, calibration state.
 	// All names are startup-stable strings (never request-arena).
@@ -2179,6 +2253,8 @@ func handle_systemone(req) (res) {
 func api_route(req) (res) {
 	if req.method == "POST" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
 	if req.method == "GET" && has_prefix(req.path, "/v1/feedback") { res = handle_feedback(req)  return }
+	// /v1/stats is public by design — aggregates only, no request text
+	if req.method == "GET" && req.path == "/v1/stats" { res = handle_stats()  return }
 	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
 		res.status = "401 Unauthorized"
