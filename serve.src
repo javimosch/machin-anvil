@@ -1343,14 +1343,20 @@ func persp_attr(name) (v) {
 	return
 }
 
-func persp_scores(t) (aj) {
+func persp_scores(t, want) (aj) {
 	// score one text through the mod_text composite -> "{attr:score,...}"
+	// want: []string of requested attributes; empty = all 9.
 	attrs := []string{}
-	attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
-	attrs = append(attrs,"INSULT")  attrs = append(attrs,"THREAT")
-	attrs = append(attrs,"IDENTITY_ATTACK")  attrs = append(attrs,"PROFANITY")
-	attrs = append(attrs,"SEXUALLY_EXPLICIT")  attrs = append(attrs,"SPAM")
-	attrs = append(attrs,"FLIRTATION")
+	if len(want) == 0 {
+		attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
+		attrs = append(attrs,"INSULT")  attrs = append(attrs,"THREAT")
+		attrs = append(attrs,"IDENTITY_ATTACK")  attrs = append(attrs,"PROFANITY")
+		attrs = append(attrs,"SEXUALLY_EXPLICIT")  attrs = append(attrs,"SPAM")
+		attrs = append(attrs,"FLIRTATION")
+	} else {
+		i := 0
+		while i < len(want) { attrs = append(attrs, want[i])  i = i + 1 }
+	}
 	aj = ""
 	cur_text = t
 	decide()
@@ -1372,6 +1378,23 @@ func handle_perspective(req) (res) {
 	if len(body) == 0 { body, _ = json_get(req.body, ".comment") }
 	body = unq(body)
 	batch, _ := json_get(req.body, ".texts")
+	reqattr, _ := json_get(req.body, ".requestedAttributes")
+	wanted := []string{}
+	if len(reqattr) > 0 {
+		// check each known attr for presence — values are {} objects
+		ka := []string{}
+		ka = append(ka,"TOXICITY")  ka = append(ka,"SEVERE_TOXICITY")
+		ka = append(ka,"INSULT")  ka = append(ka,"THREAT")
+		ka = append(ka,"IDENTITY_ATTACK")  ka = append(ka,"PROFANITY")
+		ka = append(ka,"SEXUALLY_EXPLICIT")  ka = append(ka,"SPAM")
+		ka = append(ka,"FLIRTATION")
+		i := 0
+		while i < len(ka) {
+			v, _ := json_get(reqattr, "." + ka[i])
+			if len(v) > 0 { wanted = append(wanted, ka[i]) }
+			i = i + 1
+		}
+	}
 	mx := -1
 	i := 0
 	while i < len(edomains) {
@@ -1391,7 +1414,7 @@ func handle_perspective(req) (res) {
 		rj := ""
 		i = 0
 		while i < len(texts) {
-			aj := persp_scores(texts[i])
+			aj := persp_scores(texts[i], wanted)
 			if i > 0 { rj = rj + "," }
 			rj = rj + "{\"attributeScores\":{" + aj + "}}"
 			i = i + 1
@@ -1407,7 +1430,7 @@ func handle_perspective(req) (res) {
 		res.status = "400 Bad Request"
 		return
 	}
-	aj2 := persp_scores(body)
+	aj2 := persp_scores(body, wanted)
 	best := 0
 	mu_rel <- 1
 	b := "{\"attributeScores\":{" + aj2 + "}}"
