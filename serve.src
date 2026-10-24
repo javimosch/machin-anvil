@@ -1346,6 +1346,7 @@ func persp_attr(name) (v) {
 func persp_scores(t, want) (aj) {
 	// score one text through the mod_text composite -> "{attr:score,...}"
 	// want: []string of requested attributes; empty = all 9.
+	// spanScores: per-sentence values, Perspective shape.
 	attrs := []string{}
 	if len(want) == 0 {
 		attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
@@ -1357,16 +1358,48 @@ func persp_scores(t, want) (aj) {
 		i := 0
 		while i < len(want) { attrs = append(attrs, want[i])  i = i + 1 }
 	}
-	aj = ""
 	cur_text = t
 	decide()
+	// capture summaries before per-sentence decides overwrite hd_probs
+	sums := []string{}
 	i := 0
 	while i < len(attrs) {
-		n := attrs[i]
 		v := 0.0
-		if n != "FLIRTATION" { v = persp_attr(n) }
+		if attrs[i] != "FLIRTATION" { v = persp_attr(attrs[i]) }
+		sums = append(sums, str(v))
+		i = i + 1
+	}
+	// per-sentence scoring — replace !? with . so offsets stay 1:1
+	norm := replace(t, "!", ".")
+	norm = replace(norm, "?", ".")
+	frags := split(norm, ".")
+	spans := []string{}
+	i = 0
+	while i < len(attrs) { spans = append(spans, "")  i = i + 1 }
+	off := 0
+	si := 0
+	while si < len(frags) {
+		f := frags[si]
+		if len(f) > 0 {
+			cur_text = f
+			decide()
+			i = 0
+			while i < len(attrs) {
+				v := 0.0
+				if attrs[i] != "FLIRTATION" { v = persp_attr(attrs[i]) }
+				if len(spans[i]) > 0 { spans[i] = spans[i] + "," }
+				spans[i] = spans[i] + "{\"begin\":" + str(off) + ",\"end\":" + str(off+len(f)) + ",\"score\":{\"value\":" + str(v) + ",\"type\":\"PROBABILITY\"}}"
+				i = i + 1
+			}
+		}
+		off = off + len(f) + 1
+		si = si + 1
+	}
+	aj = ""
+	i = 0
+	while i < len(attrs) {
 		if i > 0 { aj = aj + "," }
-		aj = aj + "\"" + n + "\":{\"summaryScore\":{\"value\":" + str(v) + ",\"type\":\"PROBABILITY\"}}"
+		aj = aj + "\"" + attrs[i] + "\":{\"summaryScore\":{\"value\":" + sums[i] + ",\"type\":\"PROBABILITY\"},\"spanScores\":[" + spans[i] + "]}"
 		i = i + 1
 	}
 	return
