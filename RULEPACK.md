@@ -44,6 +44,7 @@ List paths inside a pack resolve relative to the pack file's directory.
 | `digits` | `N` | a run of ≥9 digit chars exists |
 | `luhn` | — | Luhn check on merged digit groups (`4111 1111 1111 1111` works) |
 | `iban` | — | IBAN mod-97 on extracted candidates |
+| `nir` | — | French INSEE/NIR mod-97 on 15-digit candidates |
 | `domains` | list file | domain tokens → sorted-list + parent-suffix walk |
 | `ge` | `input:thresh` | `scores[input] >= thresh` (score-policy lanes) |
 | `le` | `input:thresh` | `scores[input] <= thresh` |
