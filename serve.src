@@ -1343,17 +1343,35 @@ func persp_attr(name) (v) {
 	return
 }
 
+func persp_scores(t) (aj) {
+	// score one text through the mod_text composite -> "{attr:score,...}"
+	attrs := []string{}
+	attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
+	attrs = append(attrs,"INSULT")  attrs = append(attrs,"THREAT")
+	attrs = append(attrs,"IDENTITY_ATTACK")  attrs = append(attrs,"PROFANITY")
+	attrs = append(attrs,"SEXUALLY_EXPLICIT")  attrs = append(attrs,"SPAM")
+	attrs = append(attrs,"FLIRTATION")
+	aj = ""
+	cur_text = t
+	decide()
+	i := 0
+	while i < len(attrs) {
+		n := attrs[i]
+		v := 0.0
+		if n != "FLIRTATION" { v = persp_attr(n) }
+		if i > 0 { aj = aj + "," }
+		aj = aj + "\"" + n + "\":{\"summaryScore\":{\"value\":" + str(v) + ",\"type\":\"PROBABILITY\"}}"
+		i = i + 1
+	}
+	return
+}
+
 func handle_perspective(req) (res) {
 	lk := <-mu_acq
 	body, _ := json_get(req.body, ".comment.text")
 	if len(body) == 0 { body, _ = json_get(req.body, ".comment") }
 	body = unq(body)
-	if len(body) == 0 {
-		mu_rel <- 1
-		res = ok_json("{\"error\":{\"message\":\"comment.text required\",\"type\":\"invalid_request_error\"}}")
-		res.status = "400 Bad Request"
-		return
-	}
+	batch, _ := json_get(req.body, ".texts")
 	mx := -1
 	i := 0
 	while i < len(edomains) {
@@ -1367,30 +1385,34 @@ func handle_perspective(req) (res) {
 	}
 	set_head(eheads[mx])
 	hd_rules_ix = erules_ix[mx]
-	cur_text = body
-	// pure-rules lane: no head_prefill — rules_decide works on cur_text alone
-	// (head_prefill on the empty Head{} crashed the worker).
-	best := decide()
-	attrs := []string{}
-	attrs = append(attrs,"TOXICITY")  attrs = append(attrs,"SEVERE_TOXICITY")
-	attrs = append(attrs,"INSULT")  attrs = append(attrs,"THREAT")
-	attrs = append(attrs,"IDENTITY_ATTACK")  attrs = append(attrs,"PROFANITY")
-	attrs = append(attrs,"SEXUALLY_EXPLICIT")  attrs = append(attrs,"SPAM")
-	attrs = append(attrs,"FLIRTATION")
-	aj := ""
-	i = 0
-	while i < len(attrs) {
-		n := attrs[i]
-		v := 0.0
-		if n != "FLIRTATION" { v = persp_attr(n) }
-		if i > 0 { aj = aj + "," }
-		aj = aj + "\"" + n + "\":{\"summaryScore\":{\"value\":" + str(v) + ",\"type\":\"PROBABILITY\"}}"
-		i = i + 1
+	if len(batch) > 0 {
+		// batch form: {texts:["t1","t2",...]} -> {"results":[scores,scores,...]}
+		texts := parse(batch, []string{})
+		rj := ""
+		i = 0
+		while i < len(texts) {
+			aj := persp_scores(texts[i])
+			if i > 0 { rj = rj + "," }
+			rj = rj + "{\"attributeScores\":{" + aj + "}}"
+			i = i + 1
+		}
+		mu_rel <- 1
+		res = ok_json("{\"results\":[" + rj + "]}")
+		log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"perspective\",\"batch\":" + str(len(texts)) + "}")
+		return
 	}
+	if len(body) == 0 {
+		mu_rel <- 1
+		res = ok_json("{\"error\":{\"message\":\"comment.text required\",\"type\":\"invalid_request_error\"}}")
+		res.status = "400 Bad Request"
+		return
+	}
+	aj2 := persp_scores(body)
+	best := 0
 	mu_rel <- 1
-	b := "{\"attributeScores\":{" + aj + "}}"
+	b := "{\"attributeScores\":{" + aj2 + "}}"
 	res = ok_json(b)
-	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"perspective\",\"state\":\"" + json_esc(body) + "\",\"route\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"perspective\",\"state\":\"" + json_esc(body) + "\",\"route\":\"\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
 	return
 }
 
