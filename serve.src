@@ -613,6 +613,16 @@ func handle_lanes() (res) {
 	while i < len(edomains) {
 		if i > 0 { b = b + "," }
 		b = b + "{\"name\":\"" + json_esc(edomains[i]) + "\",\"routes\":" + str(eheads[i].nr)
+		if i < len(erules_ix) && erules_ix[i] >= 0 {
+			rp := rulepacks[erules_ix[i]]
+			b = b + ",\"kind\":\"rules\",\"classes\":["
+			ci := 0
+			while ci < len(rp.names) { if ci > 0 { b = b + "," }  b = b + "\"" + json_esc(rp.names[ci]) + "\""  ci = ci + 1 }
+			b = b + "]"
+			if len(rp.wf_names) > 0 { b = b + ",\"workflows\":" + str(len(rp.wf_names)) }
+		} else {
+			b = b + ",\"kind\":\"head\""
+		}
 		j := 0
 		while j < cq_n { if cq_names[j] == edomains[i] { b = b + ",\"qhat\":" + str(cq_vals[j]) }  j = j + 1 }
 		j = 0
