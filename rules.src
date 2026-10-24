@@ -351,6 +351,27 @@ func iban_ok(t) (ok) {
 	return
 }
 
+// French NIR (numéro de sécurité sociale): 15 digits, key = 97 - (first13 mod 97)
+func nir_ok(t) (ok) {
+	ok = 0
+	m := regex_find(t, "[1-8][ 0-9]{14}")
+	if len(m) == 0 { return }
+	d := []int{}
+	i := 0
+	while i < len(m) {
+		c := byte_at(bytes(m), i)
+		if c >= 48 && c <= 57 { d = append(d, c - 48) }
+		i = i + 1
+	}
+	if len(d) != 15 { return }
+	n := 0
+	i = 0
+	while i < 13 { n = n * 10 + d[i]  i = i + 1 }
+	key := 97 - (n % 97)
+	if key == d[13] * 10 + d[14] { ok = 1 }
+	return
+}
+
 // domain-shaped tokens in text: [a-z0-9-]+(.[a-z0-9-]+)+ — caller checks
 // each token (and its parent suffixes) against a domain set.
 func text_domains(t) (out) {
@@ -387,6 +408,7 @@ func rule_fires(p, j, lowtext) (hit) {
 		while i < len(runs) { if luhn_ok(runs[i]) == 1 { hit = 1  return }  i = i + 1 }
 	}
 	if kind == "iban" { hit = iban_ok(cur_text) }
+	if kind == "nir" { hit = nir_ok(cur_text) }
 	// numeric score inputs: arg = "input:threshold" (ge/le) or "input" (missing)
 	if kind == "ge" || kind == "le" {
 		colon := index(arg, ":")
