@@ -467,6 +467,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"GET\",\"path\":\"/livez\",\"doc\":\"k8s liveness — always 200 while serving\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/readyz\",\"doc\":\"k8s readiness — 503 until a head or expert lane is loaded\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/lanes\",\"doc\":\"per-lane readiness: routes, qhat, minconf, gate\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/comments:analyze\",\"doc\":\"Perspective API drop-in — attributeScores from the mod_text composite + matched_rule evidence\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
@@ -1389,6 +1390,7 @@ func handle_perspective(req) (res) {
 	mu_rel <- 1
 	b := "{\"attributeScores\":{" + aj + "}}"
 	res = ok_json(b)
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"perspective\",\"state\":\"" + json_esc(body) + "\",\"route\":\"" + json_esc(hd_names[best]) + "\",\"conf\":" + str(peek_f32(hd_probs, best*4)) + "}")
 	return
 }
 
