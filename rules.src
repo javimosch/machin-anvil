@@ -60,8 +60,17 @@ type rp_file struct {
 func reload_rulepack(path, ix) {
 	// re-read a pack into the same slot — /v1/admin/reload path; the whole
 	// pack (rules + listpool) is rebuilt and swapped, old lists drop with it.
+	// NOTE: rulepacks[ix] = p (struct element assign) corrupts the stored pack
+	// in MFL — splice-rebuild via append instead, the proven pattern.
 	p := read_rulepack(path)
-	if ix >= 0 && ix < len(rulepacks) { rulepacks[ix] = p }
+	if ix < 0 || ix >= len(rulepacks) { return }
+	nr := []RulePack{}
+	i := 0
+	while i < len(rulepacks) {
+		if i == ix { nr = append(nr, p) } else { nr = append(nr, rulepacks[i]) }
+		i = i + 1
+	}
+	rulepacks = nr
 }
 
 func read_rulepack(path) (p) {

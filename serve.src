@@ -890,6 +890,30 @@ type QhReq struct {
 }
 var qhat_ch = make(chan QhReq)
 
+type RlReq struct {
+	ack chan int
+}
+var reload_ch = make(chan RlReq)
+
+// reload_actor owns rulepack swaps: it runs on its own long-lived goroutine
+// (permanent arena), so packs it re-parses stay valid — a request-handler
+// parse would dangle after arena_reset() (see the QhReq comment above).
+// Holds the decision mutex while swapping so in-flight decisions never see
+// a half-rebuilt rulepacks slice.
+func reload_actor() {
+	for {
+		s := <-reload_ch
+		lk := <-mu_acq
+		i := 0
+		while i < len(erules_ix) {
+			if erules_ix[i] >= 0 { reload_rulepack(erules_path[i], erules_ix[i]) }
+			i = i + 1
+		}
+		mu_rel <- 1
+		s.ack <- 1
+	}
+}
+
 type FbReg struct {
 	remote string
 	ack    chan int
@@ -2269,12 +2293,14 @@ func api_route(req) (res) {
 			res.status = "403 Forbidden"
 			return
 		}
+		rack := make(chan int)
+		reload_ch <- RlReq{ack: rack}
+		rv := <- rack
 		rl := ""
 		rn := 0
 		i := 0
 		while i < len(erules_ix) {
 			if erules_ix[i] >= 0 {
-				reload_rulepack(erules_path[i], erules_ix[i])
 				if rn > 0 { rl = rl + "," }
 				rl = rl + "\"" + edomains[i] + "\""
 				rn = rn + 1
@@ -2562,6 +2588,7 @@ func main() {
 	go mutex_srv(mu_acq, mu_rel)
 	go mutex_srv(met_acq, met_rel)
 	go qhat_actor()
+	go reload_actor()
 	go fbreg_actor()
 	boot_ms = now_ms()
 	println("colibri serve: model=" + model_id + " dim=" + str(dim) + " layers=" + str(n_layers) + " workers=" + str(n_workers) + " skills=" + str(len(skills)) + " loaded in " + str(now_ms() - t0) + " ms")
