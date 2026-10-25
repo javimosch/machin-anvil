@@ -1502,6 +1502,7 @@ func handle_guard_req(req, resp_side) (res) {
 	severe = append(severe,"injection")  severe = append(severe,"extraction")
 	verdict := "pass"
 	reasons := ""
+	evidence := ""
 	li := 0
 	while li < len(names) {
 		lname := names[li]
@@ -1516,6 +1517,10 @@ func handle_guard_req(req, resp_side) (res) {
 			if cls != "clean" && cls != "none" && cls != "oos" {
 				if len(reasons) > 0 { reasons = reasons + "," }
 				reasons = reasons + "\"" + lname + ":" + cls + "\""
+				if len(cur_matched) > 0 {
+					if len(evidence) > 0 { evidence = evidence + "," }
+					evidence = evidence + "\"" + lname + ":" + cur_matched + "\""
+				}
 				if lname == "injection" { verdict = "block" }
 				if verdict == "pass" {
 					si := 0
@@ -1528,7 +1533,7 @@ func handle_guard_req(req, resp_side) (res) {
 	}
 	cur_matched = ""
 	cur_unchecked = []string{}
-	res = ok_json("{\"verdict\":\"" + verdict + "\",\"reasons\":[" + reasons + "]}")
+	res = ok_json("{\"verdict\":\"" + verdict + "\",\"reasons\":[" + reasons + "],\"evidence\":[" + evidence + "]}")
 	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"guard\",\"verdict\":\"" + verdict + "\"}")
 	return
 }
