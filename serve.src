@@ -1596,12 +1596,48 @@ func handle_guard_response(req) (res) {
 
 var policy_ix = -1  // tail slot in rulepacks for the inline-policy pack
 
+func policy_eval_one(pj, body) (out) {
+	// eval one policy JSON against body -> class+score+matched_rule JSON
+	f := parse(pj, rp_file{})
+	if len(f.classes) == 0 { return "{\"error\":\"policy.classes required\"}" }
+	path := "/tmp/mtlm_policy.json"
+	write_file(path, pj)
+	pack := make(chan int)
+	policy_ch <- PolReq{path: path, ack: pack}
+	pok := <- pack
+	_ = pok
+	hd_rules_ix = policy_ix
+	cur_text = body
+	best := decide()
+	return "{\"class\":\"" + hd_names[best] + "\",\"score\":" + str(peek_f32(hd_probs, best*4)) + ",\"matched_rule\":\"" + cur_matched + "\"}"
+}
+
 func handle_policy(req) (res) {
 	// POST /v1/policy {state:"text", policy:{format,classes,rules:[...]}}
-	// policy-as-input: evaluate the client's inline rulepack, no install.
+	// {policies:[{...},...]} batch form — N policies on one text.
 	pj, _ := json_get(req.body, ".policy")
 	body, _ := json_get(req.body, ".state")
 	if len(body) == 0 { body, _ = json_get(req.body, ".text") }
+	batch, _ := json_get(req.body, ".policies")
+	if len(batch) > 0 && len(body) > 0 {
+		pols := parse(batch, []rp_file{})
+		rj := ""
+		i := 0
+		while i < len(pols) {
+			f := pols[i]
+			if len(f.classes) > 0 {
+				p := pack_from_rp(f, "")
+				cur_text = body
+				best := pack_decide(p)
+				if i > 0 { rj = rj + "," }
+				rj = rj + "{\"class\":\"" + hd_names[best] + "\",\"score\":" + str(peek_f32(hd_probs, best*4)) + ",\"matched_rule\":\"" + cur_matched + "\"}"
+			}
+			i = i + 1
+		}
+		res = ok_json("{\"results\":[" + rj + "]}")
+		log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"policy\",\"batch\":" + str(len(pols)) + "}")
+		return
+	}
 	if len(pj) == 0 || len(body) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"state and policy required\",\"type\":\"invalid_request_error\"}}")
 		return
@@ -1612,22 +1648,8 @@ func handle_policy(req) (res) {
 		res = ok_json("{\"error\":{\"message\":\"policy.classes required\",\"type\":\"invalid_request_error\"}}")
 		return
 	}
-	// write the pack bytes (request-arena-safe — just disk I/O), then hand the
-	// parse+register to policy_actor (permanent arena) — request-side
-	// read_rulepack allocates strings that die at arena_reset().
-	path := "/tmp/mtlm_policy.json"
-	write_file(path, pj)
-	pack := make(chan int)
-	policy_ch <- PolReq{path: path, ack: pack}
-	pok := <- pack
-	_ = pok
-	hd_rules_ix = policy_ix
-	cur_text = body
-	best := decide()
-	cls := hd_names[best]
-	score := peek_f32(hd_probs, best*4)
-	res = ok_json("{\"class\":\"" + cls + "\",\"score\":" + str(score) + ",\"matched_rule\":\"" + cur_matched + "\"}")
-	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"policy\",\"class\":\"" + cls + "\"}")
+	res = ok_json(policy_eval_one(pj, body))
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"policy\"}")
 	return
 }
 

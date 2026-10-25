@@ -77,10 +77,14 @@ func read_rulepack(path) (p) {
 	b := read_file(path)
 	f := parse(b, rp_file{})
 	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
+	p = pack_from_rp(f, path)
+	return
+}
+
+func pack_from_rp(f, path) (p) {
+	// build a RulePack from a parsed rp_file — path is only used for list-file
+	// resolution (words/phrases/domains); "" for inline packs
 	p = RulePack{}
-	b := read_file(path)
-	f := parse(b, rp_file{})
-	if len(f.classes) == 0 { println("rules pack has no classes: " + path)  exit(1) }
 	p.names = f.classes
 	wi := 0
 	while wi < len(f.workflows) {
@@ -488,7 +492,11 @@ func rule_fires(p, j, lowtext) (hit) {
 
 // evaluate a rulepack against cur_text; fills hd_* as a confident head would.
 func rules_decide(ix) (best) {
-	p := rulepacks[ix]
+	best = pack_decide(rulepacks[ix])
+	return
+}
+
+func pack_decide(p) (best) {
 	hd_names = p.names
 	hd_nr = p.nr
 	hd_probs = p.probs
