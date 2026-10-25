@@ -1484,7 +1484,13 @@ func handle_guard(req) (res) {
 	}
 	cur_text = body
 	names := []string{}
-	names = append(names,"injection")  names = append(names,"pii_rules")  names = append(names,"mod_text")
+	// client-selected lanes: {lanes:["injection","pii_rules"]} — default is all three
+	lj, _ := json_get(req.body, ".lanes")
+	if len(lj) > 0 {
+		names = parse(lj, []string{})
+	} else {
+		names = append(names,"injection")  names = append(names,"piirules")  names = append(names,"mod_text")
+	}
 	severe := []string{}
 	severe = append(severe,"self_harm")  severe = append(severe,"extremist")  severe = append(severe,"grooming")
 	severe = append(severe,"sextortion")  severe = append(severe,"hate")  severe = append(severe,"violent")
