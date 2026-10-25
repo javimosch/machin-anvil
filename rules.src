@@ -416,6 +416,8 @@ func rule_fires(p, j, lowtext) (hit) {
 	// raw-case pass: case-sensitive patterns (base58) need un-lowered text
 	if kind == "regex" && hit == 0 { if regex_match(cur_text, arg) { hit = 1 } }
 	if kind == "contains" { if index(lowtext, arg) >= 0 { hit = 1 } }
+	// raw pass: leet fold can rewrite digits in the arg itself (w3 -> we)
+	if kind == "contains" && hit == 0 { if index(to_lower(cur_text), arg) >= 0 { hit = 1 } }
 	if kind == "digits" { hit = has_digit_run(lowtext, 9) }
 	if kind == "luhn" {
 		runs := card_candidates(lowtext)
