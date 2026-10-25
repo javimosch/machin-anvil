@@ -918,6 +918,40 @@ func reload_actor() {
 	}
 }
 
+// policy_actor owns the inline-policy pack slot: it runs on a long-lived
+// goroutine (permanent arena), so the pack it parses stays valid — a
+// request-handler read_rulepack dangles after arena_reset() (crash seen
+// live: second /v1/policy call after a reset). Same pattern as reload_actor.
+type PolReq struct {
+	path string
+	ack  chan int
+}
+var policy_ch = make(chan PolReq)
+
+func policy_actor() {
+	for {
+		s := <-policy_ch
+		lk := <-mu_acq
+		_ = lk
+		p := read_rulepack(s.path)
+		if policy_ix < 0 {
+			policy_ix = len(rulepacks)
+			rulepacks = append(rulepacks, p)
+		} else {
+			// splice-rebuild the tail — rulepacks[ix] = p corrupts the pack
+			nr := []RulePack{}
+			i := 0
+			while i < len(rulepacks) {
+				if i == policy_ix { nr = append(nr, p) } else { nr = append(nr, rulepacks[i]) }
+				i = i + 1
+			}
+			rulepacks = nr
+		}
+		mu_rel <- 1
+		s.ack <- 1
+	}
+}
+
 type FbReg struct {
 	remote string
 	ack    chan int
@@ -1567,22 +1601,15 @@ func handle_policy(req) (res) {
 		res = ok_json("{\"error\":{\"message\":\"policy.classes required\",\"type\":\"invalid_request_error\"}}")
 		return
 	}
+	// write the pack bytes (request-arena-safe — just disk I/O), then hand the
+	// parse+register to policy_actor (permanent arena) — request-side
+	// read_rulepack allocates strings that die at arena_reset().
 	path := "/tmp/mtlm_policy.json"
 	write_file(path, pj)
-	p := read_rulepack(path)
-	if policy_ix < 0 {
-		policy_ix = len(rulepacks)
-		rulepacks = append(rulepacks, p)
-	} else {
-		// splice-rebuild the tail — rulepacks[ix] = p corrupts the pack in MFL
-		nr := []RulePack{}
-		i := 0
-		while i < len(rulepacks) {
-			if i == policy_ix { nr = append(nr, p) } else { nr = append(nr, rulepacks[i]) }
-			i = i + 1
-		}
-		rulepacks = nr
-	}
+	pack := make(chan int)
+	policy_ch <- PolReq{path: path, ack: pack}
+	pok := <- pack
+	_ = pok
 	hd_rules_ix = policy_ix
 	cur_text = body
 	best := decide()
@@ -2872,6 +2899,7 @@ func main() {
 	go mutex_srv(met_acq, met_rel)
 	go qhat_actor()
 	go reload_actor()
+	go policy_actor()
 	go fbreg_actor()
 	boot_ms = now_ms()
 	println("colibri serve: model=" + model_id + " dim=" + str(dim) + " layers=" + str(n_layers) + " workers=" + str(n_workers) + " skills=" + str(len(skills)) + " loaded in " + str(now_ms() - t0) + " ms")
