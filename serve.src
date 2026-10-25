@@ -468,6 +468,7 @@ func handle_guide() (res) {
 	g = g + "{\"method\":\"GET\",\"path\":\"/readyz\",\"doc\":\"k8s readiness — 503 until a head or expert lane is loaded\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/v1/lanes\",\"doc\":\"per-lane readiness: routes, qhat, minconf, gate\"},"
 	g = g + "{\"method\":\"POST\",\"path\":\"/v1/comments:analyze\",\"doc\":\"Perspective API drop-in — attributeScores from the mod_text composite + matched_rule evidence\"},"
+	g = g + "{\"method\":\"POST\",\"path\":\"/v1/guard\",\"doc\":\"LLM-gateway verdict — chains injection+PII+moderation into pass|flag|block + typed reasons\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/guide\",\"doc\":\"this document\"},"
 	g = g + "{\"method\":\"GET\",\"path\":\"/llms.txt\",\"doc\":\"agent-facing plain-text summary\"}],"
 	g = g + "\"loaded\":{\"routes\":" + str(def_head.nr) + ",\"experts\":" + str(len(edomains)) + ",\"gate_domains\":" + str(len(ghead.names)) + "},"
