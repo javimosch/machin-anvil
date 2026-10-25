@@ -1473,9 +1473,9 @@ func handle_perspective(req) (res) {
 	return
 }
 
-func handle_guard(req) (res) {
+func handle_guard_req(req, resp_side) (res) {
 	// POST /v1/guard {state:"text"} — single LLM-gateway verdict
-	// chains injection + pii_rules + mod_text; emits pass|flag|block + reasons.
+	// POST /v1/guard/response — the output side: PII + moderation (no injection).
 	body, _ := json_get(req.body, ".state")
 	if len(body) == 0 { body, _ = json_get(req.body, ".text") }
 	if len(body) == 0 {
@@ -1489,7 +1489,11 @@ func handle_guard(req) (res) {
 	if len(lj) > 0 {
 		names = parse(lj, []string{})
 	} else {
-		names = append(names,"injection")  names = append(names,"piirules")  names = append(names,"mod_text")
+		if resp_side == 1 {
+			names = append(names,"piirules")  names = append(names,"mod_text")
+		} else {
+			names = append(names,"injection")  names = append(names,"piirules")  names = append(names,"mod_text")
+		}
 	}
 	severe := []string{}
 	severe = append(severe,"self_harm")  severe = append(severe,"extremist")  severe = append(severe,"grooming")
@@ -1525,6 +1529,16 @@ func handle_guard(req) (res) {
 	cur_unchecked = []string{}
 	res = ok_json("{\"verdict\":\"" + verdict + "\",\"reasons\":[" + reasons + "]}")
 	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"guard\",\"verdict\":\"" + verdict + "\"}")
+	return
+}
+
+func handle_guard(req) (res) {
+	res = handle_guard_req(req, 0)
+	return
+}
+
+func handle_guard_response(req) (res) {
+	res = handle_guard_req(req, 1)
 	return
 }
 
@@ -2495,6 +2509,7 @@ func api_route(req) (res) {
 	// Perspective API drop-in — key-gated like the rest of /v1/*
 	if req.method == "POST" && req.path == "/v1/comments:analyze" { res = handle_perspective(req)  return }
 	if req.method == "POST" && req.path == "/v1/guard" { res = handle_guard(req)  return }
+	if req.method == "POST" && req.path == "/v1/guard/response" { res = handle_guard_response(req)  return }
 	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
 		res.status = "401 Unauthorized"
