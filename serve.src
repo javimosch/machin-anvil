@@ -1472,6 +1472,55 @@ func handle_perspective(req) (res) {
 	return
 }
 
+func handle_guard(req) (res) {
+	// POST /v1/guard {state:"text"} — single LLM-gateway verdict
+	// chains injection + pii_rules + mod_text; emits pass|flag|block + reasons.
+	body, _ := json_get(req.body, ".state")
+	if len(body) == 0 { body, _ = json_get(req.body, ".text") }
+	if len(body) == 0 {
+		res = ok_json("{\"error\":{\"message\":\"state or text required\",\"type\":\"invalid_request_error\"}}")
+		return
+	}
+	cur_text = body
+	names := []string{}
+	names = append(names,"injection")  names = append(names,"pii_rules")  names = append(names,"mod_text")
+	severe := []string{}
+	severe = append(severe,"self_harm")  severe = append(severe,"extremist")  severe = append(severe,"grooming")
+	severe = append(severe,"sextortion")  severe = append(severe,"hate")  severe = append(severe,"violent")
+	severe = append(severe,"injection")  severe = append(severe,"extraction")
+	verdict := "pass"
+	reasons := ""
+	li := 0
+	while li < len(names) {
+		lname := names[li]
+		mx := -1
+		i := 0
+		while i < len(edomains) { if edomains[i] == lname { mx = i }  i = i + 1 }
+		if mx >= 0 {
+			set_head(eheads[mx])
+			hd_rules_ix = erules_ix[mx]
+			best := decide()
+			cls := hd_names[best]
+			if cls != "clean" && cls != "none" && cls != "oos" {
+				if len(reasons) > 0 { reasons = reasons + "," }
+				reasons = reasons + "\"" + lname + ":" + cls + "\""
+				if lname == "injection" { verdict = "block" }
+				if verdict == "pass" {
+					si := 0
+					while si < len(severe) { if cls == severe[si] { verdict = "block" }  si = si + 1 }
+				}
+				if verdict == "pass" { verdict = "flag" }
+			}
+		}
+		li = li + 1
+	}
+	cur_matched = ""
+	cur_unchecked = []string{}
+	res = ok_json("{\"verdict\":\"" + verdict + "\",\"reasons\":[" + reasons + "]}")
+	log_decision("{\"ts\":" + str(now_ms()) + ",\"ep\":\"guard\",\"verdict\":\"" + verdict + "\"}")
+	return
+}
+
 func with_unchecked(body) (out) {
 	out = body
 	if len(cur_matched) > 0 && len(out) > 0 && substr(out, len(out)-1, len(out)) == "}" {
@@ -2438,6 +2487,7 @@ func api_route(req) (res) {
 	if req.method == "GET" && req.path == "/v1/stats" { res = handle_stats()  return }
 	// Perspective API drop-in — key-gated like the rest of /v1/*
 	if req.method == "POST" && req.path == "/v1/comments:analyze" { res = handle_perspective(req)  return }
+	if req.method == "POST" && req.path == "/v1/guard" { res = handle_guard(req)  return }
 	if len(api_keys) > 0 && has_prefix(req.path, "/v1/") && auth_ok(req) == 0 {
 		res = ok_json("{\"error\":{\"message\":\"missing or invalid api key\",\"type\":\"invalid_request_error\"}}")
 		res.status = "401 Unauthorized"
